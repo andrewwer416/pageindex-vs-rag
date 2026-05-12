@@ -49,13 +49,24 @@ python scripts/fetch_tesla_10k.py
 
 ### 3. Build the indices
 
-The traditional RAG index (FAISS) is committed pre-built. The PageIndex tree is generated locally:
+All indices (FAISS + PageIndex tree) are committed pre-built against the
+default Tesla 10-K, so you can skip this step entirely if you're not changing
+the document. To rebuild them (after swapping the source PDF):
 
 ```bash
-PYTHONPATH=. python scripts/build_index.py pageindex   # slow: many LLM calls
-# or for a quick hand-crafted tree (skips PageIndex's LLM tree-builder):
+# FAISS: chunk + embed (fast, ~30s, no LLM calls)
+PYTHONPATH=. python scripts/build_index.py rag
+
+# PageIndex tree — RECOMMENDED PATH: hand-craft from section headings
+# (works reliably with any model that can write a one-line summary).
 PYTHONPATH=. python scripts/build_pageindex_manual.py
 ```
+
+There's also a full LLM-driven indexer (`scripts/build_index.py pageindex`)
+that calls PageIndex's prompt chain end-to-end. **It only works well with
+GPT-4-class models.** With smaller open-source models the chain accumulates
+per-call errors and the resulting tree typically has hollowed-out sections
+even with the patches in this repo. See "Caveats" below.
 
 ### 4. Run
 
@@ -99,10 +110,10 @@ pageindex-vs-rag/
 │   ├── build_index.py                build FAISS index + PageIndex tree
 │   └── build_pageindex_manual.py     hand-craft tree (for when auto-indexing flops)
 ├── data/                    PDF lives here (gitignored)
-├── index/                   generated indices
-│   ├── faiss.index          ← committed (pre-built)
-│   ├── chunks.json          ← committed (pre-built)
-│   └── pageindex_workspace/ ← generated locally
+├── index/                   pre-built indices
+│   ├── faiss.index          ← committed
+│   ├── chunks.json          ← committed
+│   └── pageindex_workspace/ ← committed (hand-crafted tree against the default 10-K)
 ├── deploy/                  Traefik + Cloudflare examples
 ├── Dockerfile
 ├── compose.yaml
@@ -112,15 +123,26 @@ pageindex-vs-rag/
 
 ## Caveats
 
-**PageIndex's auto-indexing is finicky with small open-source models.** The library's prompt chain (~50 LLM calls in series, each demanding strictly-formatted JSON) was designed against GPT-4-class models. With qwen3-8B and even qwen3-14B on consumer hardware, individual calls fail often enough that the end-to-end pipeline breaks. Patches in `app/pageindex/`:
+**PageIndex's LLM-driven auto-indexing isn't viable with small open models — even with patches.**
+The library's prompt chain (~50 LLM calls in series, each demanding strictly-formatted JSON) was designed against GPT-4-class models. Empirical results on this hardware (RTX 2080, qwen3-14B Q4 at 32K ctx, ~2 hours):
+
+- TOC parsing, page-offset calculation, and `verify_toc` all completed.
+- But ~60% of sections were dropped from the resulting tree — items 1, 1A, 1B, 1C, 2-8 (pp.8-181) didn't make it in.
+- The tree also picked up a hallucinated top-level "Preface" node and gave near-identical templated summaries to multiple distinct sections.
+
+Patches in `app/pageindex/` mitigate the crashes (no hangs, no exceptions) but
+they can't make a small model reason about 100K tokens of body text reliably enough to build a faithful tree. The patches present:
 
 - inject `/no_think` for qwen3 + strip `<think>…</think>` from content
-- bump `num_ctx` (Ollama) and timeout for long prompts
-- relax `verify_toc`'s page-coverage threshold (default fails when the model can't extrapolate page numbers for back-half items)
-- short-circuit `process_no_toc` (the broken-with-small-models fallback) — return partial TOC instead of recursing
-- disable `process_large_node_recursively` — large sections stay as single nodes
+- bump `num_ctx` and per-call timeout for Ollama
+- relax `verify_toc`'s page-coverage threshold so it doesn't early-exit on documents where back-half items can't be extrapolated from the toc_check_page_num window
+- short-circuit the `process_no_toc` fallback — return whatever partial TOC we have instead of recursing into a path small models can't satisfy
+- disable `process_large_node_recursively` — large sections stay as single nodes rather than being subdivided
 
-If auto-indexing still flops on your hardware, `scripts/build_pageindex_manual.py` parses section headings out of the PDF directly and produces a tree that retrieval uses identically. Not "full PageIndex" but the retrieval-side reasoning — the actually interesting half — works the same way.
+**`scripts/build_pageindex_manual.py` is the recommended path on consumer hardware.**
+It parses ALL-CAPS section headings out of the PDF (e.g. `ITEM 1A. RISK FACTORS`), builds the tree directly with correct physical page numbers, then makes one ~3000-char LLM call per section to generate a one-line summary. Those short structured-output calls succeed reliably even with 8B models.
+
+The retrieval-side reasoning — the actually interesting half of PageIndex — works identically against either tree. If you want the LLM-driven indexer for the full experience, point `INDEX_MODEL` at `openai/gpt-4o-mini` or similar; a one-time indexing call against a hosted API runs in ~5 minutes for ~$0.50.
 
 ## Credits
 

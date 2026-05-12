@@ -11,9 +11,7 @@ __pycache__/
 data/*.pdf
 data/*.htm
 
-# PageIndex tree workspace — regenerated locally
-index/pageindex_workspace/
-index/pageindex_doc_id.txt
+# (PageIndex tree workspace is now committed pre-built — see index/pageindex_workspace/)
 
 # Personal deployment configs (kept on the dev machine, not in the repo)
 compose.dick.yaml

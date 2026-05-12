@@ -63,7 +63,7 @@ st.title("PageIndex vs Traditional RAG")
 st.markdown(
     "Same document, same question, two retrieval architectures. "
     f"The document is **{config.DOC_NAME}** (227 pages). "
-    "Models run on a self-hosted Ollama box; no external APIs."
+    "All LLM calls go through whichever provider is configured in `.env`."
 )
 
 status = _warm_caches()
@@ -71,8 +71,9 @@ with st.expander("System status", expanded=False):
     st.write(f"- Embedder: `{config.EMBED_MODEL}` ({status['embedder']})")
     st.write(f"- FAISS index: {status['faiss']}")
     st.write(f"- PageIndex tree: {status['pageindex']}")
-    st.write(f"- Ollama endpoint: `{config.OLLAMA_BASE}`")
-    st.write(f"- Indexing/answer model: `{config.INDEX_MODEL}`")
+    st.write(f"- LLM endpoint: `{config.LLM_API_BASE}`")
+    st.write(f"- Indexing model: `{config.INDEX_MODEL}`")
+    st.write(f"- Answer model: `{config.ANSWER_MODEL}`")
     st.write(f"- Retrieval reasoning model: `{config.RETRIEVE_MODEL}`")
 
 st.markdown("---")
