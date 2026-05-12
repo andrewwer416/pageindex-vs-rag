@@ -106,13 +106,20 @@ with st.expander("System status", expanded=False):
 
 st.markdown("---")
 st.markdown("**Try a sample question, or write your own:**")
+
+# Initialize the text-area's bound session-state value once.
+# In Streamlit 1.x, value= on a widget is ignored after first render — the
+# state belongs to st.session_state[key]. So we write directly to that key
+# from the sample-question buttons and let the widget read it via key=.
+if "query_input" not in st.session_state:
+    st.session_state["query_input"] = ""
+
 cols = st.columns(len(SAMPLE_QUESTIONS))
-chosen = None
 for i, q in enumerate(SAMPLE_QUESTIONS):
     if cols[i].button(f"#{i+1}", help=q, use_container_width=True):
-        chosen = q
+        st.session_state["query_input"] = q
 
-query = st.text_area("Question", value=chosen or st.session_state.get("last_query", ""), height=80)
+query = st.text_area("Question", key="query_input", height=80)
 go = st.button("Run both pipelines", type="primary", disabled=not query.strip())
 
 # On click: actually run the pipelines and stash results in session_state.
