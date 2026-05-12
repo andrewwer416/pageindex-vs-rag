@@ -140,16 +140,16 @@ def get_embedder():
 
 
 def describe_embed_config() -> dict:
-    """Surface what actually got loaded — drop into a debug panel."""
+    """Surface what actually got loaded. Never displays any character of any
+    secret — only whether it's set."""
     provider = os.environ.get("EMBED_PROVIDER", "sentence-transformers").strip().lower()
     if provider in ("openai", "api"):
         api_key = _env("EMBED_API_KEY", "LLM_API_KEY")
-        redacted = (api_key[:4] + "…" + api_key[-2:]) if len(api_key) > 8 else ("set" if api_key else "(empty)")
         return {
             "provider": "openai-compatible API",
             "base_url": _env("EMBED_API_BASE", "LLM_API_BASE"),
             "model": config.EMBED_MODEL,
-            "api_key (redacted)": redacted,
+            "api_key": f"set (length {len(api_key)})" if api_key else "(empty)",
             "api_key sent via": _env("EMBED_API_KEY_HEADER", "LLM_API_KEY_HEADER") or "Authorization (SDK default)",
             "ca_bundle": _env("EMBED_CA_BUNDLE", "LLM_CA_BUNDLE") or "(system CAs)",
         }

@@ -118,20 +118,26 @@ def get_async_client() -> AsyncOpenAI:
 
 
 def describe_client_config() -> dict:
-    """For debugging: returns the resolved auth/transport config with the API
-    key redacted. Useful to drop into a Streamlit status panel."""
+    """For debugging: resolved auth/transport config. No characters of the API
+    key are ever shown — only whether it's set. Header values are likewise
+    summarized as set/empty so a custom-header-as-auth setup doesn't leak."""
     raw_key = os.environ.get("LLM_API_KEY", "")
-    redacted = (raw_key[:4] + "…" + raw_key[-2:]) if len(raw_key) > 8 else ("set" if raw_key else "(empty)")
+    key_status = f"set (length {len(raw_key)})" if raw_key else "(empty)"
     headers = _parse_headers()
     custom_header = os.environ.get("LLM_API_KEY_HEADER", "").strip()
+    # Summarize header names + value-set/empty, never the actual values.
+    header_summary = [
+        f"{k} = {'<set>' if (headers.get(k) or '').strip() else '<empty>'}"
+        for k in headers
+    ]
     return {
         "base_url": os.environ.get("LLM_API_BASE") or config.LLM_API_BASE,
-        "api_key (redacted)": redacted,
+        "api_key": key_status,
         "api_key sent via": custom_header or "Authorization (SDK default)",
-        "extra header keys": [k for k in headers if k.lower() != "authorization"],
+        "extra headers": header_summary,
         "ca_bundle": os.environ.get("LLM_CA_BUNDLE") or "(system CAs)",
         "verify_ssl": os.environ.get("LLM_VERIFY_SSL", "true"),
-        "client_cert": os.environ.get("LLM_CLIENT_CERT") or "(none)",
+        "client_cert": "(set)" if os.environ.get("LLM_CLIENT_CERT") else "(none)",
         "timeout_s": int(os.environ.get("LLM_TIMEOUT", "1800")),
     }
 
