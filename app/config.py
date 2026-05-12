@@ -29,6 +29,16 @@ See .env.example for ready-to-paste templates.
 import os
 from pathlib import Path
 
+# Load .env BEFORE any env-var reads below. Looks first for an explicit DOTENV_PATH,
+# then for .env in the project root regardless of where the process was started.
+try:
+    from dotenv import load_dotenv
+    _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    _dotenv_path = os.getenv("DOTENV_PATH") or str(_PROJECT_ROOT / ".env")
+    load_dotenv(_dotenv_path, override=False)
+except ImportError:
+    pass  # dotenv is optional; env vars set in the shell still work
+
 # In the Docker container the project is at /app; locally it's the repo root.
 ROOT = Path(os.getenv("PROJECT_ROOT", str(Path(__file__).resolve().parent.parent)))
 DATA_DIR = Path(os.getenv("DATA_DIR", str(ROOT / "data")))
