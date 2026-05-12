@@ -149,7 +149,7 @@ def describe_embed_config() -> dict:
             "provider": "openai-compatible API",
             "base_url": _env("EMBED_API_BASE", "LLM_API_BASE"),
             "model": config.EMBED_MODEL,
-            "api_key": f"set (length {len(api_key)})" if api_key else "(empty)",
+            "api_key": "<hidden>" if api_key else "(not configured)",
             "api_key sent via": _env("EMBED_API_KEY_HEADER", "LLM_API_KEY_HEADER") or "Authorization (SDK default)",
             "ca_bundle": _env("EMBED_CA_BUNDLE", "LLM_CA_BUNDLE") or "(system CAs)",
         }

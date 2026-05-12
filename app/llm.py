@@ -122,22 +122,18 @@ def describe_client_config() -> dict:
     key are ever shown — only whether it's set. Header values are likewise
     summarized as set/empty so a custom-header-as-auth setup doesn't leak."""
     raw_key = os.environ.get("LLM_API_KEY", "")
-    key_status = f"set (length {len(raw_key)})" if raw_key else "(empty)"
     headers = _parse_headers()
     custom_header = os.environ.get("LLM_API_KEY_HEADER", "").strip()
-    # Summarize header names + value-set/empty, never the actual values.
-    header_summary = [
-        f"{k} = {'<set>' if (headers.get(k) or '').strip() else '<empty>'}"
-        for k in headers
-    ]
+    # Only list header NAMES — never values or any hint about them.
+    header_names = sorted(headers.keys())
     return {
         "base_url": os.environ.get("LLM_API_BASE") or config.LLM_API_BASE,
-        "api_key": key_status,
+        "api_key": "<hidden>" if raw_key else "(not configured)",
         "api_key sent via": custom_header or "Authorization (SDK default)",
-        "extra headers": header_summary,
+        "extra header names": header_names,
         "ca_bundle": os.environ.get("LLM_CA_BUNDLE") or "(system CAs)",
         "verify_ssl": os.environ.get("LLM_VERIFY_SSL", "true"),
-        "client_cert": "(set)" if os.environ.get("LLM_CLIENT_CERT") else "(none)",
+        "client_cert": "<configured>" if os.environ.get("LLM_CLIENT_CERT") else "(none)",
         "timeout_s": int(os.environ.get("LLM_TIMEOUT", "1800")),
     }
 
