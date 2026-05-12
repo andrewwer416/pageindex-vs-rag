@@ -3,6 +3,7 @@ import json
 import time
 from pathlib import Path
 
+import os
 import streamlit as st
 
 import sys
@@ -67,6 +68,28 @@ st.markdown(
 )
 
 status = _warm_caches()
+
+# Temporary debug panel — surfaces internal state so we can see why results
+# aren't rendering. Toggle off via env var when no longer needed:
+#   STREAMLIT_DEBUG=false  ->  hides the panel
+if os.environ.get("STREAMLIT_DEBUG", "true").lower() != "false":
+    with st.expander("🐛 Debug state (temporary)", expanded=True):
+        st.write("**streamlit version:**", st.__version__)
+        st.write("**session_state keys:**", list(st.session_state.keys()))
+        r = st.session_state.get("results")
+        if r is None:
+            st.write("**results in session_state:** _none yet_")
+        else:
+            st.write({
+                "last query": r.get("query", "<none>"),
+                "rag answer present": r.get("rag") is not None,
+                "rag answer length": len((r.get("rag") or {}).get("answer", "")),
+                "rag err": r.get("rag_err") or "<none>",
+                "pi answer present": r.get("pi") is not None,
+                "pi answer length": len((r.get("pi") or {}).get("answer", "")),
+                "pi err": r.get("pi_err") or "<none>",
+            })
+
 with st.expander("System status", expanded=False):
     st.write(f"- Embedder: `{config.EMBED_MODEL}` ({status['embedder']})")
     st.write(f"- FAISS index: {status['faiss']}")
