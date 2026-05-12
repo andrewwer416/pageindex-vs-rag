@@ -1,6 +1,6 @@
 """Custom 2-step tree-walk agent over a PageIndex tree.
 
-We call LiteLLM directly (rather than the OpenAI Agents SDK) so we have full control
+We call the OpenAI Python SDK directly (rather than the OpenAI Agents SDK) so we have full control
 over the reasoning trace and can render it side-by-side with the trad-RAG pipeline.
 
 Flow:

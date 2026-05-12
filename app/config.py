@@ -1,14 +1,24 @@
-"""Configuration. All LLM-related settings come from environment variables
-so the same image runs against any OpenAI-compatible or Ollama endpoint.
+"""Configuration. All LLM-related settings come from environment variables.
+
+The app talks to a single OpenAI-compatible endpoint via the openai Python
+SDK — including local servers that need a custom CA bundle, custom headers,
+or an alternate authentication scheme.
 
 Required env vars when running:
-  LLM_API_BASE   e.g. http://localhost:11434 (Ollama) or http://localhost:8000/v1 (OpenAI-compat)
-  MODEL          model string in LiteLLM format. Used for all three roles below
-                 unless individually overridden. Examples:
-                   ollama_chat/qwen3:14b
-                   openai/gemma-3-27b-it
+  LLM_API_BASE   full URL ending in /v1, e.g. http://localhost:11434/v1
+                 (Ollama's OpenAI shim) or https://internal.example.com/.../v1
+  MODEL          model name your server expects in the chat-completions request
+                 (run `curl $LLM_API_BASE/models` to discover). Used for all
+                 three roles below unless individually overridden.
 
-Optional per-role overrides (default to MODEL if unset):
+Optional:
+  LLM_API_KEY      bearer token (any non-empty string if server doesn't auth)
+  LLM_HEADERS      extra request headers: JSON ('{"X-Foo":"bar"}') or "K1:V1;K2:V2"
+  LLM_CA_BUNDLE    path to a CA-cert PEM for verifying the server's TLS cert
+  LLM_CLIENT_CERT  for mTLS: "cert.pem:key.pem" or a single combined .pem
+  LLM_VERIFY_SSL   set to "false" to skip server-cert verification (testing only)
+  LLM_TIMEOUT      seconds per call; default 1800
+
   INDEX_MODEL      model used to build the PageIndex tree (1× heavy run)
   ANSWER_MODEL     model used to generate the final answer in both pipelines
   RETRIEVE_MODEL   model used by PageIndex to reason over the tree at query time
@@ -33,16 +43,12 @@ PAGEINDEX_DOC_ID_FILE = INDEX_DIR / "pageindex_doc_id.txt"
 FAISS_PATH = INDEX_DIR / "faiss.index"
 CHUNKS_PATH = INDEX_DIR / "chunks.json"
 
-# Single endpoint for all LLM calls. LiteLLM routes based on the model prefix
-# (openai/ → uses LLM_API_BASE; ollama_chat/ → uses OLLAMA_API_BASE).
-LLM_API_BASE = os.getenv("LLM_API_BASE", "http://localhost:11434")
-os.environ.setdefault("OLLAMA_API_BASE", LLM_API_BASE)
-os.environ.setdefault("OPENAI_API_BASE", LLM_API_BASE)
-# A dummy key — many local OpenAI-compatible servers don't enforce auth but LiteLLM expects something set.
-os.environ.setdefault("OPENAI_API_KEY", os.getenv("LLM_API_KEY", "not-needed"))
+# The base URL of the OpenAI-compatible endpoint. Should end in /v1 for most
+# servers; e.g. Ollama's shim is at http://localhost:11434/v1.
+LLM_API_BASE = os.getenv("LLM_API_BASE", "http://localhost:11434/v1")
 
 # Single model used everywhere by default; override any individual role as needed.
-MODEL = os.getenv("MODEL", "ollama_chat/qwen3:14b")
+MODEL = os.getenv("MODEL", "qwen3:14b")
 INDEX_MODEL = os.getenv("INDEX_MODEL", MODEL)
 ANSWER_MODEL = os.getenv("ANSWER_MODEL", MODEL)
 RETRIEVE_MODEL = os.getenv("RETRIEVE_MODEL", MODEL)

@@ -1,15 +1,105 @@
-"""LiteLLM wrappers that handle Qwen3 thinking-mode and DeepSeek-R1 think-tag extraction."""
+"""Thin wrapper around the OpenAI Python SDK.
+
+We talk to a single OpenAI-compatible endpoint for all roles (indexing,
+answering, retrieval reasoning). That endpoint can be:
+  - hosted OpenAI itself
+  - any local OpenAI-compatible server (vLLM, llama.cpp, LM Studio, etc.)
+  - Ollama's /v1 compatibility shim (http://localhost:11434/v1)
+  - a corporate gateway behind custom CA + headers
+
+All knobs live in env vars; see .env.example.
+"""
+from __future__ import annotations
+import json
 import os
 import re
-import litellm
+import threading
 
-from . import config  # ensures OLLAMA_API_BASE is set
+import httpx
+from openai import OpenAI, AsyncOpenAI
 
+from . import config
 
-litellm.drop_params = True
-litellm.telemetry = False
 
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+_lock = threading.Lock()
+_sync_client: OpenAI | None = None
+_async_client: AsyncOpenAI | None = None
+
+
+def _parse_headers() -> dict[str, str]:
+    """LLM_HEADERS can be either JSON ('{"X-Foo": "bar"}') or "K1:V1;K2:V2"."""
+    raw = os.environ.get("LLM_HEADERS", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return {str(k): str(v) for k, v in parsed.items()}
+    except json.JSONDecodeError:
+        pass
+    out: dict[str, str] = {}
+    for pair in raw.split(";"):
+        if ":" in pair:
+            k, v = pair.split(":", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def _build_http_client(async_mode: bool = False):
+    """httpx client respecting LLM_CA_BUNDLE (server-cert CA) and LLM_CLIENT_CERT (mTLS)."""
+    ca = os.environ.get("LLM_CA_BUNDLE", "").strip()
+    verify: bool | str = ca if ca else True
+    if os.environ.get("LLM_VERIFY_SSL", "").lower() == "false":
+        verify = False
+
+    kwargs: dict = {"verify": verify, "timeout": int(os.environ.get("LLM_TIMEOUT", "1800"))}
+    cert = os.environ.get("LLM_CLIENT_CERT", "").strip()
+    if cert:
+        if ":" in cert:
+            cert_path, key_path = cert.split(":", 1)
+            kwargs["cert"] = (cert_path.strip(), key_path.strip())
+        else:
+            kwargs["cert"] = cert
+    return (httpx.AsyncClient if async_mode else httpx.Client)(**kwargs)
+
+
+def get_sync_client() -> OpenAI:
+    global _sync_client
+    with _lock:
+        if _sync_client is None:
+            _sync_client = OpenAI(
+                base_url=os.environ.get("LLM_API_BASE") or config.LLM_API_BASE,
+                api_key=os.environ.get("LLM_API_KEY", "not-needed"),
+                default_headers=_parse_headers() or None,
+                http_client=_build_http_client(async_mode=False),
+                max_retries=2,
+            )
+    return _sync_client
+
+
+def get_async_client() -> AsyncOpenAI:
+    global _async_client
+    with _lock:
+        if _async_client is None:
+            _async_client = AsyncOpenAI(
+                base_url=os.environ.get("LLM_API_BASE") or config.LLM_API_BASE,
+                api_key=os.environ.get("LLM_API_KEY", "not-needed"),
+                default_headers=_parse_headers() or None,
+                http_client=_build_http_client(async_mode=True),
+                max_retries=2,
+            )
+    return _async_client
+
+
+def split_thinking(content: str) -> tuple[str, str]:
+    """Return (thinking, answer). For models that emit inline <think>…</think> blocks."""
+    if not content:
+        return "", ""
+    matches = _THINK_RE.findall(content)
+    thinking = "\n\n".join(m.strip() for m in matches).strip()
+    answer = _THINK_RE.sub("", content).strip()
+    return thinking, answer
 
 
 def _is_qwen3(model: str) -> bool:
@@ -17,7 +107,9 @@ def _is_qwen3(model: str) -> bool:
 
 
 def _prepare_messages(model: str, messages: list[dict]) -> list[dict]:
-    """Inject /no_think for qwen3 so JSON-only responses don't get padded with thinking."""
+    """qwen3 emits a (usually empty) <think>...</think> block even when /no_think
+    is set, which downstream JSON extractors choke on. We inject /no_think
+    defensively for qwen3 models and strip the tags in split_thinking()."""
     if not _is_qwen3(model):
         return messages
     out = []
@@ -29,16 +121,6 @@ def _prepare_messages(model: str, messages: list[dict]) -> list[dict]:
     return out
 
 
-def split_thinking(content: str) -> tuple[str, str]:
-    """Return (thinking, answer). For models that emit <think>…</think> blocks."""
-    if not content:
-        return "", ""
-    matches = _THINK_RE.findall(content)
-    thinking = "\n\n".join(m.strip() for m in matches).strip()
-    answer = _THINK_RE.sub("", content).strip()
-    return thinking, answer
-
-
 def complete(
     model: str,
     messages: list[dict],
@@ -47,21 +129,15 @@ def complete(
     max_tokens: int | None = None,
     tools: list[dict] | None = None,
     tool_choice: str | dict | None = None,
-    api_base: str | None = None,
+    api_base: str | None = None,  # kept for signature compat; ignored — client is configured globally
 ) -> dict:
     """Single completion call. Returns {'content', 'thinking', 'tool_calls', 'raw'}."""
-    # LiteLLM picks the right env var based on model prefix; we set both.
-    kwargs = dict(
-        model=model,
-        messages=_prepare_messages(model, messages),
-        temperature=temperature,
-        api_base=api_base or os.environ.get("LLM_API_BASE") or os.environ.get("OLLAMA_API_BASE"),
-    )
-    # Ollama-specific: request a large context window so multi-page prompts don't truncate,
-    # and bump the timeout to accommodate slower local inference.
-    if "ollama" in (model or "").lower():
-        kwargs["num_ctx"] = int(os.environ.get("OLLAMA_NUM_CTX", "32768"))
-        kwargs["timeout"] = int(os.environ.get("LLM_TIMEOUT", "1800"))
+    client = get_sync_client()
+    kwargs: dict = {
+        "model": model,
+        "messages": _prepare_messages(model, messages),
+        "temperature": temperature,
+    }
     if max_tokens is not None:
         kwargs["max_tokens"] = max_tokens
     if tools:
@@ -69,13 +145,10 @@ def complete(
     if tool_choice:
         kwargs["tool_choice"] = tool_choice
 
-    resp = litellm.completion(**kwargs)
+    resp = client.chat.completions.create(**kwargs)
     msg = resp.choices[0].message
     content = msg.content or ""
-    # For models that emit <think>…</think> inline (qwen3 etc.) split here.
     inline_thinking, content_clean = split_thinking(content)
-    # For models where the provider separates reasoning into its own field
-    # (deepseek-r1 on Ollama → LiteLLM exposes `reasoning_content`).
     provider_thinking = (getattr(msg, "reasoning_content", None) or "").strip()
     thinking = provider_thinking or inline_thinking
     answer = content_clean if inline_thinking else content

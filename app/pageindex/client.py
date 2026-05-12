@@ -16,13 +16,9 @@ META_INDEX = "_meta.json"
 
 
 def _normalize_retrieve_model(model: str) -> str:
-    """Preserve supported Agents SDK prefixes and route other provider paths via LiteLLM."""
-    passthrough_prefixes = ("litellm/", "openai/")
-    if not model or "/" not in model:
-        return model
-    if model.startswith(passthrough_prefixes):
-        return model
-    return f"litellm/{model}"
+    """Pass model strings through unchanged. We talk to a single OpenAI-compatible
+    endpoint via the openai SDK — no provider prefix is needed or supported."""
+    return model
 
 
 class PageIndexClient:

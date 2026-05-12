@@ -1,4 +1,3 @@
-import litellm
 import logging
 import os
 import textwrap
@@ -17,11 +16,18 @@ import yaml
 from pathlib import Path
 from types import SimpleNamespace as config
 
-# Backward compatibility: support CHATGPT_API_KEY as alias for OPENAI_API_KEY
-if not os.getenv("OPENAI_API_KEY") and os.getenv("CHATGPT_API_KEY"):
-    os.environ["OPENAI_API_KEY"] = os.getenv("CHATGPT_API_KEY")
+import tiktoken
 
-litellm.drop_params = True
+# Import the OpenAI-SDK based clients/helpers from the app shim.
+# This whole file is reachable as `app.pageindex.utils`, so the relative
+# `..llm` import resolves to `app.llm`.
+from ..llm import (
+    get_sync_client,
+    get_async_client,
+    split_thinking,
+)
+
+_TOKEN_ENCODER = tiktoken.get_encoding("cl100k_base")
 
 import re as _re
 _THINK_RE = _re.compile(r"<think>.*?</think>", _re.DOTALL)
@@ -49,38 +55,46 @@ def _maybe_inject_no_think(model, messages):
 
 
 def count_tokens(text, model=None):
+    """Approximate token count via tiktoken (cl100k_base). PageIndex only uses
+    this for chunk-size planning so the approximation is fine across providers."""
     if not text:
         return 0
-    return litellm.token_counter(model=model, text=text)
+    try:
+        return len(_TOKEN_ENCODER.encode(text))
+    except Exception:
+        # As a last resort, ~4 chars per token.
+        return max(1, len(text) // 4)
 
 
-def _ollama_kwargs(model):
-    """For Ollama models, request a large context window so multi-page prompts don't truncate.
-    Bump the per-call timeout too: large local models with KV-cache spillover can take
-    several minutes to process a 25K-token prompt."""
-    if model and ("ollama" in model.lower()):
-        return {
-            "num_ctx": int(os.environ.get("OLLAMA_NUM_CTX", "32768")),
-            "timeout": int(os.environ.get("LLM_TIMEOUT", "1800")),
-        }
-    return {}
+def _extract_content_and_thinking(message):
+    """Pull plain content + reasoning out of an SDK response message, handling
+    both `<think>` inline blocks and provider-side `reasoning_content` fields."""
+    content = (getattr(message, "content", None) or "") or ""
+    provider_thinking = (getattr(message, "reasoning_content", None) or "").strip()
+    if provider_thinking:
+        # Provider already separated thinking; content is clean.
+        return content.strip(), provider_thinking
+    inline_thinking, content_clean = split_thinking(content)
+    if inline_thinking:
+        return content_clean, inline_thinking
+    return content, ""
 
 
 def llm_completion(model, prompt, chat_history=None, return_finish_reason=False):
-    if model:
-        model = model.removeprefix("litellm/")
+    """Synchronous chat completion. Returns content string (or (content, finish_reason))."""
     max_retries = 10
     messages = list(chat_history) + [{"role": "user", "content": prompt}] if chat_history else [{"role": "user", "content": prompt}]
     messages = _maybe_inject_no_think(model, messages)
+    client = get_sync_client()
     for i in range(max_retries):
         try:
-            response = litellm.completion(
+            response = client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=0,
-                **_ollama_kwargs(model),
             )
-            content = _scrub_thinking(response.choices[0].message.content)
+            content, _thinking = _extract_content_and_thinking(response.choices[0].message)
+            content = _scrub_thinking(content)
             if return_finish_reason:
                 finish_reason = "max_output_reached" if response.choices[0].finish_reason == "length" else "finished"
                 return content, finish_reason
@@ -97,21 +111,20 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
                 return ""
 
 
-
 async def llm_acompletion(model, prompt):
-    if model:
-        model = model.removeprefix("litellm/")
+    """Async chat completion. Returns content string."""
     max_retries = 10
     messages = _maybe_inject_no_think(model, [{"role": "user", "content": prompt}])
+    client = get_async_client()
     for i in range(max_retries):
         try:
-            response = await litellm.acompletion(
+            response = await client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=0,
-                **_ollama_kwargs(model),
             )
-            return _scrub_thinking(response.choices[0].message.content)
+            content, _thinking = _extract_content_and_thinking(response.choices[0].message)
+            return _scrub_thinking(content)
         except Exception as e:
             print('************* Retrying *************')
             logging.error(f"Error: {e}")
@@ -431,7 +444,7 @@ def get_page_tokens(pdf_path, model=None, pdf_parser="PyPDF2"):
         for page_num in range(len(pdf_reader.pages)):
             page = pdf_reader.pages[page_num]
             page_text = page.extract_text()
-            token_length = litellm.token_counter(model=model, text=page_text)
+            token_length = count_tokens(page_text, model=model)
             page_list.append((page_text, token_length))
         return page_list
     elif pdf_parser == "PyMuPDF":
@@ -443,7 +456,7 @@ def get_page_tokens(pdf_path, model=None, pdf_parser="PyPDF2"):
         page_list = []
         for page in doc:
             page_text = page.get_text()
-            token_length = litellm.token_counter(model=model, text=page_text)
+            token_length = count_tokens(page_text, model=model)
             page_list.append((page_text, token_length))
         return page_list
     else:
