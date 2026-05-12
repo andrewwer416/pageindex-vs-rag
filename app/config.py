@@ -27,7 +27,17 @@ Optional:
 See .env.example for ready-to-paste templates.
 """
 import os
+import sys
 from pathlib import Path
+
+# On Windows, the default ProactorEventLoop causes spurious
+# "RuntimeError: Event loop is closed" warnings at shutdown when AsyncOpenAI /
+# httpx connections are garbage-collected after asyncio.run() closes the loop.
+# SelectorEventLoop doesn't have this issue and we don't use subprocesses, so
+# the trade-off is free.
+if sys.platform == "win32":
+    import asyncio
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # Load .env BEFORE any env-var reads below. Looks first for an explicit DOTENV_PATH,
 # then for .env in the project root regardless of where the process was started.
