@@ -198,14 +198,25 @@ if results:
             for step in steps:
                 title = "Step 1 — Plan: pick relevant sections from the tree" if step["name"] == "plan" else "Step 2 — Answer using only those pages"
                 with st.expander(title, expanded=(step["name"] == "plan")):
-                    if step.get("thinking"):
-                        st.markdown("*Model reasoning:*")
-                        st.text(step["thinking"])
+                    thinking = step.get("thinking", "").strip()
+                    if thinking:
+                        st.markdown("*Model reasoning trace:*")
+                        st.text(thinking)
+                    else:
+                        st.caption("_This model doesn't surface a reasoning trace (no `<think>` blocks or `reasoning_content` field in the response)._")
+
                     if step["name"] == "plan":
                         st.markdown(f"**Selected pages:** `{step.get('parsed_pages','')}`")
                         if step.get("reasoning"):
                             st.markdown("*Stated reason:*")
                             st.info(step["reasoning"])
+                    else:
+                        # For the answer step, also surface the raw model output here
+                        # so the expander has visible content even when thinking is absent.
+                        mo = step.get("model_output", "").strip()
+                        if mo:
+                            st.markdown("*Raw model output for this step:*")
+                            st.text(mo[:2000] + ("…" if len(mo) > 2000 else ""))
             if pi.get("page_text"):
                 with st.expander(f"Content of pages read ({pi['pages_read']})"):
                     st.text(pi["page_text"][:5000] + ("…" if len(pi["page_text"]) > 5000 else ""))
