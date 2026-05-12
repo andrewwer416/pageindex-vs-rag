@@ -35,8 +35,8 @@ All settings live in env vars — point at any backend by editing `.env`.
 git clone https://github.com/<you>/pageindex-vs-rag.git
 cd pageindex-vs-rag
 cp .env.example .env
-# Edit .env: LLM_API_BASE, INDEX_MODEL, ANSWER_MODEL, RETRIEVE_MODEL.
-# See .env.example for examples of Ollama, vLLM/llama.cpp, and hosted OpenAI.
+# Edit .env: set LLM_API_BASE + MODEL (one model serves all three roles by default).
+# Worked examples for Ollama, vLLM, llama.cpp, LM Studio, OpenAI, and Groq inline in the file.
 ```
 
 ### 2. Fetch the source PDF

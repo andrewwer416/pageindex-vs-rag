@@ -2,12 +2,19 @@
 so the same image runs against any OpenAI-compatible or Ollama endpoint.
 
 Required env vars when running:
-  LLM_API_BASE     e.g. http://localhost:11434 (Ollama) or http://localhost:8000/v1 (OpenAI-compat)
-  INDEX_MODEL      model string in LiteLLM format, e.g. "ollama_chat/qwen3:14b" or "openai/gemma-3-27b-it"
-  ANSWER_MODEL     model for final answer generation in both pipelines
-  RETRIEVE_MODEL   model for PageIndex's retrieval-time reasoning (a thinking model shines here)
+  LLM_API_BASE   e.g. http://localhost:11434 (Ollama) or http://localhost:8000/v1 (OpenAI-compat)
+  MODEL          model string in LiteLLM format. Used for all three roles below
+                 unless individually overridden. Examples:
+                   ollama_chat/qwen3:14b
+                   openai/gemma-3-27b-it
 
-See .env.example for a starter template.
+Optional per-role overrides (default to MODEL if unset):
+  INDEX_MODEL      model used to build the PageIndex tree (1× heavy run)
+  ANSWER_MODEL     model used to generate the final answer in both pipelines
+  RETRIEVE_MODEL   model used by PageIndex to reason over the tree at query time
+                   (a "thinking" model surfaces a richer trace here)
+
+See .env.example for ready-to-paste templates.
 """
 import os
 from pathlib import Path
@@ -34,9 +41,11 @@ os.environ.setdefault("OPENAI_API_BASE", LLM_API_BASE)
 # A dummy key — many local OpenAI-compatible servers don't enforce auth but LiteLLM expects something set.
 os.environ.setdefault("OPENAI_API_KEY", os.getenv("LLM_API_KEY", "not-needed"))
 
-INDEX_MODEL = os.getenv("INDEX_MODEL", "ollama_chat/qwen3:14b")
-ANSWER_MODEL = os.getenv("ANSWER_MODEL", "ollama_chat/qwen3:8b")
-RETRIEVE_MODEL = os.getenv("RETRIEVE_MODEL", "ollama_chat/deepseek-r1:14b")
+# Single model used everywhere by default; override any individual role as needed.
+MODEL = os.getenv("MODEL", "ollama_chat/qwen3:14b")
+INDEX_MODEL = os.getenv("INDEX_MODEL", MODEL)
+ANSWER_MODEL = os.getenv("ANSWER_MODEL", MODEL)
+RETRIEVE_MODEL = os.getenv("RETRIEVE_MODEL", MODEL)
 
 EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-small-en-v1.5")
 CHUNK_TOKENS = int(os.getenv("CHUNK_TOKENS", "450"))
