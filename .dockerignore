@@ -1,0 +1,11 @@
+.venv
+.git
+__pycache__
+*.pyc
+data/*.htm
+data/tsla-10k-2024.pdf
+scripts
+README.md
+.dockerignore
+Dockerfile
+compose.yaml

@@ -1,0 +1,10 @@
+model: "gpt-4o-2024-11-20"
+# model: "anthropic/claude-sonnet-4-6"
+retrieve_model: "gpt-5.4"  # defaults to `model` if not set
+toc_check_page_num: 15   # 15 body pages ~= 22K tokens, fits comfortably in our 32K num_ctx window with room for response
+max_page_num_each_node: 10000     # effectively disable large-node recursive refinement
+max_token_num_each_node: 10000000 # — process_no_toc isn't reliable with 8-14B models
+if_add_node_id: "yes"
+if_add_node_summary: "yes"
+if_add_doc_description: "no"
+if_add_node_text: "no"

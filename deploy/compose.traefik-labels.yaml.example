@@ -1,0 +1,36 @@
+# Example: deploy with Traefik in docker-provider mode (Host rule expressed
+# as labels). Assumes a Traefik instance already runs on `traefik-network`
+# with `--providers.docker.exposedByDefault=false`.
+
+services:
+  pageindex-vs-rag:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: pageindex-vs-rag:latest
+    container_name: pageindex-vs-rag
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    volumes:
+      - ../index:/app/index:ro
+      - ../data:/app/data:ro
+    networks:
+      - traefik-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pageindex.rule=Host(`pageindex.example.com`)"
+      - "traefik.http.routers.pageindex.entrypoints=web"
+      - "traefik.http.services.pageindex.loadbalancer.server.port=8501"
+
+networks:
+  traefik-network:
+    external: true

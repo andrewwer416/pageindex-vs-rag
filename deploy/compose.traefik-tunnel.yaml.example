@@ -1,0 +1,37 @@
+# Example: deploy the app fronted by an existing Traefik (file-provider
+# mode) and a Cloudflare tunnel. Companion files in this directory:
+#   - traefik-route.yaml.example          → goes into your Traefik dynamic/ dir
+#   - cloudflared-ingress-snippet.yaml.example  → append to your cloudflared config
+
+services:
+  pageindex-vs-rag:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: pageindex-vs-rag:latest
+    container_name: pageindex-vs-rag
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    volumes:
+      - ../index:/app/index:ro
+      - ../data:/app/data:ro
+    networks:
+      - ingress
+    # Optional: if the LLM runs on the same host (not in this compose),
+    # add host.docker.internal so the container can reach it.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+networks:
+  ingress:
+    external: true
+    # Replace `tunnel-ingress` with the actual network name where your
+    # Traefik + cloudflared are attached.
+    name: tunnel-ingress

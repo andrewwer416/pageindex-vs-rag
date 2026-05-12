@@ -1,0 +1,5 @@
+# Append this block to your existing cloudflared config.yml, *above* the
+# catch-all `service: http_status:404` line. Then restart cloudflared.
+
+- hostname: pageindex.example.com
+  service: http://traefik:80

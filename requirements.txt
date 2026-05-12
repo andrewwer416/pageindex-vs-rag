@@ -1,0 +1,10 @@
+litellm
+pymupdf
+PyPDF2
+python-dotenv
+pyyaml
+sentence-transformers
+faiss-cpu
+streamlit
+numpy
+tiktoken

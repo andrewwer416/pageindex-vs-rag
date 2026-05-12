@@ -1,0 +1,39 @@
+# Generic local-dev compose. Exposes the app on http://localhost:8501.
+# For deploying behind Traefik + a Cloudflare tunnel, see deploy/*.example.
+#
+# Usage:
+#   cp .env.example .env  # then edit LLM_API_BASE, INDEX_MODEL, etc.
+#   docker compose up -d --build
+
+services:
+  pageindex-vs-rag:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pageindex-vs-rag:latest
+    container_name: pageindex-vs-rag
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8501:8501"
+    volumes:
+      # Pre-built indices on the host so re-indexing doesn't rebuild the image.
+      - ./index:/app/index:ro
+      - ./data:/app/data:ro
+    # So the container can reach an LLM running on the host at host.docker.internal.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

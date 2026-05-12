@@ -1,0 +1,17 @@
+# Drop this file (or a renamed copy) into your Traefik dynamic/ directory.
+# Edit the hostname to match your domain.
+
+http:
+  routers:
+    pageindex:
+      rule: "Host(`pageindex.example.com`)"
+      entrypoints:
+        - web
+      service: pageindex
+
+  services:
+    pageindex:
+      loadBalancer:
+        servers:
+          # Reached on the shared network by container name from compose.traefik-tunnel.yaml.example
+          - url: "http://pageindex-vs-rag:8501"
