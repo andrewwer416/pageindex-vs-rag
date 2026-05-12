@@ -71,10 +71,12 @@ with st.expander("System status", expanded=False):
     st.write(f"- Embedder: `{config.EMBED_MODEL}` ({status['embedder']})")
     st.write(f"- FAISS index: {status['faiss']}")
     st.write(f"- PageIndex tree: {status['pageindex']}")
-    st.write(f"- LLM endpoint: `{config.LLM_API_BASE}`")
     st.write(f"- Indexing model: `{config.INDEX_MODEL}`")
     st.write(f"- Answer model: `{config.ANSWER_MODEL}`")
     st.write(f"- Retrieval reasoning model: `{config.RETRIEVE_MODEL}`")
+    st.markdown("**LLM transport** (redacted):")
+    from app.llm import describe_client_config
+    st.json(describe_client_config())
 
 st.markdown("---")
 st.markdown("**Try a sample question, or write your own:**")

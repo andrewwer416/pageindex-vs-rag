@@ -28,22 +28,39 @@ _async_client: AsyncOpenAI | None = None
 
 
 def _parse_headers() -> dict[str, str]:
-    """LLM_HEADERS can be either JSON ('{"X-Foo": "bar"}') or "K1:V1;K2:V2"."""
+    """LLM_HEADERS can be either JSON ('{"X-Foo": "bar"}') or "K1:V1;K2:V2".
+
+    Then, if LLM_API_KEY_HEADER is set, send the API key in that header (with
+    the value from LLM_API_KEY) instead of the SDK's default Authorization
+    header. Many corporate endpoints expect `apikey: …`, `x-api-key: …`, etc.
+    Set LLM_API_KEY_HEADER=Authorization to keep the default behavior explicit.
+    """
     raw = os.environ.get("LLM_HEADERS", "").strip()
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-        if isinstance(parsed, dict):
-            return {str(k): str(v) for k, v in parsed.items()}
-    except json.JSONDecodeError:
-        pass
-    out: dict[str, str] = {}
-    for pair in raw.split(";"):
-        if ":" in pair:
-            k, v = pair.split(":", 1)
-            out[k.strip()] = v.strip()
-    return out
+    headers: dict[str, str] = {}
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                headers = {str(k): str(v) for k, v in parsed.items()}
+        except json.JSONDecodeError:
+            for pair in raw.split(";"):
+                if ":" in pair:
+                    k, v = pair.split(":", 1)
+                    headers[k.strip()] = v.strip()
+
+    custom_auth_header = os.environ.get("LLM_API_KEY_HEADER", "").strip()
+    api_key = os.environ.get("LLM_API_KEY", "").strip()
+    if custom_auth_header and api_key:
+        headers[custom_auth_header] = api_key
+        # NOTE: we cannot suppress the SDK's auto-generated `Authorization`
+        # header from here — httpx rejects None values. The SDK will still
+        # send `Authorization: Bearer <api_key>` in addition to your custom
+        # header. Real-world internal gateways that use custom auth headers
+        # typically ignore Authorization if the custom one is valid, so this
+        # is usually fine. If your server is strict about it, set
+        # LLM_API_KEY to a value that the gateway also accepts as a Bearer
+        # token (often the same value).
+    return headers
 
 
 def _build_http_client(async_mode: bool = False):
@@ -64,13 +81,21 @@ def _build_http_client(async_mode: bool = False):
     return (httpx.AsyncClient if async_mode else httpx.Client)(**kwargs)
 
 
+def _api_key_for_sdk() -> str:
+    """The openai SDK requires `api_key` to be a non-empty string. If the user
+    routes auth through a custom header, the SDK's own Authorization header
+    is being suppressed in _parse_headers — the value here is irrelevant then
+    but must still be set so the constructor doesn't raise."""
+    return os.environ.get("LLM_API_KEY", "").strip() or "not-needed"
+
+
 def get_sync_client() -> OpenAI:
     global _sync_client
     with _lock:
         if _sync_client is None:
             _sync_client = OpenAI(
                 base_url=os.environ.get("LLM_API_BASE") or config.LLM_API_BASE,
-                api_key=os.environ.get("LLM_API_KEY", "not-needed"),
+                api_key=_api_key_for_sdk(),
                 default_headers=_parse_headers() or None,
                 http_client=_build_http_client(async_mode=False),
                 max_retries=2,
@@ -84,12 +109,31 @@ def get_async_client() -> AsyncOpenAI:
         if _async_client is None:
             _async_client = AsyncOpenAI(
                 base_url=os.environ.get("LLM_API_BASE") or config.LLM_API_BASE,
-                api_key=os.environ.get("LLM_API_KEY", "not-needed"),
+                api_key=_api_key_for_sdk(),
                 default_headers=_parse_headers() or None,
                 http_client=_build_http_client(async_mode=True),
                 max_retries=2,
             )
     return _async_client
+
+
+def describe_client_config() -> dict:
+    """For debugging: returns the resolved auth/transport config with the API
+    key redacted. Useful to drop into a Streamlit status panel."""
+    raw_key = os.environ.get("LLM_API_KEY", "")
+    redacted = (raw_key[:4] + "…" + raw_key[-2:]) if len(raw_key) > 8 else ("set" if raw_key else "(empty)")
+    headers = _parse_headers()
+    custom_header = os.environ.get("LLM_API_KEY_HEADER", "").strip()
+    return {
+        "base_url": os.environ.get("LLM_API_BASE") or config.LLM_API_BASE,
+        "api_key (redacted)": redacted,
+        "api_key sent via": custom_header or "Authorization (SDK default)",
+        "extra header keys": [k for k in headers if k.lower() != "authorization"],
+        "ca_bundle": os.environ.get("LLM_CA_BUNDLE") or "(system CAs)",
+        "verify_ssl": os.environ.get("LLM_VERIFY_SSL", "true"),
+        "client_cert": os.environ.get("LLM_CLIENT_CERT") or "(none)",
+        "timeout_s": int(os.environ.get("LLM_TIMEOUT", "1800")),
+    }
 
 
 def split_thinking(content: str) -> tuple[str, str]:
