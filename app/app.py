@@ -92,43 +92,76 @@ for i, q in enumerate(SAMPLE_QUESTIONS):
 query = st.text_area("Question", value=chosen or st.session_state.get("last_query", ""), height=80)
 go = st.button("Run both pipelines", type="primary", disabled=not query.strip())
 
+# On click: actually run the pipelines and stash results in session_state.
+# This keeps the output visible across subsequent reruns (a sample-button
+# click, text edit, etc.) instead of vanishing when `go` flips back to False.
 if go and query.strip():
     st.session_state["last_query"] = query
+    rag_err = None
+    pi_err = None
+    rag = None
+    pi = None
+    rag_time = pi_time = 0.0
 
-    left, right = st.columns(2, gap="large")
-
-    with left:
-        st.subheader("Traditional RAG")
-        st.caption("Chunk → embed → FAISS top-k similarity → LLM generates answer from chunks.")
-        with st.spinner("Retrieving + generating..."):
+    with st.spinner("Running both pipelines..."):
+        try:
             t = time.time()
             rag = _cached_rag(query)
             rag_time = time.time() - t
+        except Exception as e:
+            rag_err = repr(e)
 
-        st.markdown(f"**Answer** *(generated in {rag_time:.1f}s)*")
-        st.write(rag["answer"])
-        with st.expander(f"Retrieved chunks (top {len(rag['hits'])} by cosine similarity)", expanded=True):
-            for h in rag["hits"]:
-                page_label = f"p. {h['page_start']}" if h["page_start"] == h["page_end"] else f"pp. {h['page_start']}–{h['page_end']}"
-                st.markdown(f"**{page_label}** &nbsp;·&nbsp; similarity `{h['score']:.3f}` &nbsp;·&nbsp; {h['tokens']} tokens")
-                st.text(h["text"][:600] + ("…" if len(h["text"]) > 600 else ""))
-                st.markdown("---")
-        if rag.get("thinking"):
-            with st.expander("Model reasoning trace"):
-                st.text(rag["thinking"])
+        if status["tree"] is not None:
+            try:
+                t = time.time()
+                pi = _cached_pageindex(query)
+                pi_time = time.time() - t
+            except Exception as e:
+                pi_err = repr(e)
+
+    st.session_state["results"] = {
+        "query": query,
+        "rag": rag, "rag_err": rag_err, "rag_time": rag_time,
+        "pi": pi, "pi_err": pi_err, "pi_time": pi_time,
+    }
+
+# Render whatever's in session_state (works after a click AND after subsequent reruns).
+results = st.session_state.get("results")
+if results:
+    left, right = st.columns(2, gap="large")
+    with left:
+        st.subheader("Traditional RAG")
+        st.caption("Chunk → embed → FAISS top-k similarity → LLM generates answer from chunks.")
+        if results["rag_err"]:
+            st.error(f"RAG pipeline failed:\n```\n{results['rag_err']}\n```")
+        elif results["rag"] is not None:
+            rag = results["rag"]
+            st.markdown(f"**Answer** *(generated in {results['rag_time']:.1f}s)*")
+            if not rag.get("answer", "").strip():
+                st.warning("LLM returned an empty answer. Check the System Status → LLM transport panel and your terminal logs.")
+            st.write(rag["answer"])
+            with st.expander(f"Retrieved chunks (top {len(rag['hits'])} by cosine similarity)", expanded=True):
+                for h in rag["hits"]:
+                    page_label = f"p. {h['page_start']}" if h["page_start"] == h["page_end"] else f"pp. {h['page_start']}–{h['page_end']}"
+                    st.markdown(f"**{page_label}** &nbsp;·&nbsp; similarity `{h['score']:.3f}` &nbsp;·&nbsp; {h['tokens']} tokens")
+                    st.text(h["text"][:600] + ("…" if len(h["text"]) > 600 else ""))
+                    st.markdown("---")
+            if rag.get("thinking"):
+                with st.expander("Model reasoning trace"):
+                    st.text(rag["thinking"])
 
     with right:
         st.subheader("PageIndex")
         st.caption("Read the document's table-of-contents tree → reason about which sections are relevant → read only those pages → answer.")
         if status["tree"] is None:
             st.warning("PageIndex tree not built yet. Run `python scripts/build_index.py pageindex`.")
-        else:
-            with st.spinner("Walking the tree..."):
-                t = time.time()
-                pi = _cached_pageindex(query)
-                pi_time = time.time() - t
-
-            st.markdown(f"**Answer** *(generated in {pi_time:.1f}s)*")
+        elif results["pi_err"]:
+            st.error(f"PageIndex pipeline failed:\n```\n{results['pi_err']}\n```")
+        elif results["pi"] is not None:
+            pi = results["pi"]
+            st.markdown(f"**Answer** *(generated in {results['pi_time']:.1f}s)*")
+            if not pi.get("answer", "").strip():
+                st.warning("LLM returned an empty answer. Check the System Status → LLM transport panel and your terminal logs.")
             st.write(pi["answer"])
 
             steps = pi["steps"]
@@ -157,19 +190,19 @@ if go and query.strip():
 *Failure modes:* documents without clear hierarchical structure; questions where the section title isn't suggestive of the content.
 """)
 
-else:
-    if status.get("tree"):
-        with st.expander(f"PageIndex tree (top-level sections of {config.DOC_NAME})", expanded=False):
-            def _render(node, depth=0):
-                if isinstance(node, list):
-                    for n in node:
-                        _render(n, depth)
-                    return
-                title = node.get("title", "?")
-                page = node.get("physical_index") or node.get("page_number")
-                page_str = f" — p. {page}" if page else ""
-                st.markdown(f"{'&nbsp;' * (depth * 4)}• **{title}**{page_str}")
-                for k, v in node.items():
-                    if k.startswith("nodes"):
-                        _render(v, depth + 1)
-            _render(status["tree"])
+# If no query has ever been run, show the PageIndex tree as a preview.
+if not results and status.get("tree"):
+    with st.expander(f"PageIndex tree (top-level sections of {config.DOC_NAME})", expanded=False):
+        def _render(node, depth=0):
+            if isinstance(node, list):
+                for n in node:
+                    _render(n, depth)
+                return
+            title = node.get("title", "?")
+            page = node.get("physical_index") or node.get("page_number")
+            page_str = f" — p. {page}" if page else ""
+            st.markdown(f"{'&nbsp;' * (depth * 4)}• **{title}**{page_str}")
+            for k, v in node.items():
+                if k.startswith("nodes"):
+                    _render(v, depth + 1)
+        _render(status["tree"])
