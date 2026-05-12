@@ -69,11 +69,10 @@ st.markdown(
 
 status = _warm_caches()
 
-# Temporary debug panel — surfaces internal state so we can see why results
-# aren't rendering. Toggle off via env var when no longer needed:
-#   STREAMLIT_DEBUG=false  ->  hides the panel
-if os.environ.get("STREAMLIT_DEBUG", "true").lower() != "false":
-    with st.expander("🐛 Debug state (temporary)", expanded=True):
+# Optional debug panel for development. Off by default; flip to true via env:
+#   STREAMLIT_DEBUG=true
+if os.environ.get("STREAMLIT_DEBUG", "false").lower() == "true":
+    with st.expander("🐛 Debug state", expanded=True):
         st.write("**streamlit version:**", st.__version__)
         st.write("**session_state keys:**", list(st.session_state.keys()))
         r = st.session_state.get("results")
@@ -90,19 +89,20 @@ if os.environ.get("STREAMLIT_DEBUG", "true").lower() != "false":
                 "pi err": r.get("pi_err") or "<none>",
             })
 
-with st.expander("System status", expanded=False):
-    st.write(f"- Embedder: `{config.EMBED_MODEL}` ({status['embedder']})")
-    st.write(f"- FAISS index: {status['faiss']}")
-    st.write(f"- PageIndex tree: {status['pageindex']}")
-    st.write(f"- Indexing model: `{config.INDEX_MODEL}`")
-    st.write(f"- Answer model: `{config.ANSWER_MODEL}`")
-    st.write(f"- Retrieval reasoning model: `{config.RETRIEVE_MODEL}`")
-    st.markdown("**LLM transport** (redacted):")
-    from app.llm import describe_client_config
-    st.json(describe_client_config())
-    st.markdown("**Embedding transport**:")
-    from app.embed import describe_embed_config
-    st.json(describe_embed_config())
+if os.environ.get("SHOW_SYSTEM_STATUS", "true").lower() != "false":
+    with st.expander("System status", expanded=False):
+        st.write(f"- Embedder: `{config.EMBED_MODEL}` ({status['embedder']})")
+        st.write(f"- FAISS index: {status['faiss']}")
+        st.write(f"- PageIndex tree: {status['pageindex']}")
+        st.write(f"- Indexing model: `{config.INDEX_MODEL}`")
+        st.write(f"- Answer model: `{config.ANSWER_MODEL}`")
+        st.write(f"- Retrieval reasoning model: `{config.RETRIEVE_MODEL}`")
+        st.markdown("**LLM transport** (redacted):")
+        from app.llm import describe_client_config
+        st.json(describe_client_config())
+        st.markdown("**Embedding transport**:")
+        from app.embed import describe_embed_config
+        st.json(describe_embed_config())
 
 st.markdown("---")
 st.markdown("**Try a sample question, or write your own:**")
