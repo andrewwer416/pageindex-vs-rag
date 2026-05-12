@@ -19,9 +19,10 @@ from types import SimpleNamespace as config
 import tiktoken
 
 # Import the OpenAI-SDK based clients/helpers from the app shim.
-# This whole file is reachable as `app.pageindex.utils`, so the relative
-# `..llm` import resolves to `app.llm`.
-from ..llm import (
+# Absolute import so this file works whether it's imported as `app.pageindex.utils`
+# (from scripts) or as `pageindex.utils` (from app/pageindex_agent.py, which puts
+# app/ on sys.path so the vendored package looks like a top-level one).
+from app.llm import (
     get_sync_client,
     get_async_client,
     split_thinking,
