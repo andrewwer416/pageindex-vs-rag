@@ -77,6 +77,9 @@ with st.expander("System status", expanded=False):
     st.markdown("**LLM transport** (redacted):")
     from app.llm import describe_client_config
     st.json(describe_client_config())
+    st.markdown("**Embedding transport**:")
+    from app.embed import describe_embed_config
+    st.json(describe_embed_config())
 
 st.markdown("---")
 st.markdown("**Try a sample question, or write your own:**")

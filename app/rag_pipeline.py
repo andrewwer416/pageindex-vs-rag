@@ -6,21 +6,16 @@ import faiss
 import numpy as np
 import pymupdf
 import tiktoken
-from sentence_transformers import SentenceTransformer
 
 from . import config
 from .llm import complete
+from .embed import get_embedder  # re-exported for callers that imported from here
+
+# Keep the historical export name working
+__all__ = ["get_embedder", "pdf_to_chunks", "build_faiss_index", "load_index", "retrieve", "answer"]
 
 
 _enc = tiktoken.get_encoding("cl100k_base")
-_embedder: SentenceTransformer | None = None
-
-
-def get_embedder() -> SentenceTransformer:
-    global _embedder
-    if _embedder is None:
-        _embedder = SentenceTransformer(config.EMBED_MODEL)
-    return _embedder
 
 
 def pdf_to_chunks(pdf_path: Path) -> list[dict]:

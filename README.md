@@ -80,15 +80,26 @@ PYTHONPATH=. streamlit run app/app.py
 
 The default `.env.example` targets Ollama. To swap backends, change the model prefix and `LLM_API_BASE`:
 
-| Backend | `LLM_API_BASE` | model string |
+| Backend | `LLM_API_BASE` | `MODEL` |
 |---|---|---|
-| Ollama (local) | `http://localhost:11434` | `ollama_chat/<model>:tag` |
-| vLLM / llama.cpp server | `http://localhost:8000/v1` | `openai/<model_name>` |
-| LM Studio | `http://localhost:1234/v1` | `openai/<model_name>` |
-| OpenAI | `https://api.openai.com/v1` | `openai/gpt-4o` |
-| Groq | `https://api.groq.com/openai/v1` | `openai/llama-3.3-70b-versatile` |
+| Ollama (local) | `http://localhost:11434/v1` | `qwen3:14b` |
+| vLLM / llama.cpp server | `http://localhost:8000/v1` | exact model id from `/models` |
+| LM Studio | `http://localhost:1234/v1` | exact model id from `/models` |
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o` |
+| Groq | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
+| Internal corporate gateway | `https://<host>/.../v1` | what the server expects |
 
-If the LLM runs on the same host as the container, use `LLM_API_BASE=http://host.docker.internal:11434` — the compose file maps that to the host gateway.
+For internal/enterprise endpoints, `LLM_API_KEY_HEADER`, `LLM_CA_BUNDLE`, `LLM_CLIENT_CERT`, and `LLM_HEADERS` cover the usual custom-auth / private-CA / mTLS setups. See `.env.example` for examples.
+
+If the LLM runs on the same host as the container, use `LLM_API_BASE=http://host.docker.internal:11434/v1` — the compose file maps that to the host gateway.
+
+### Embeddings
+
+`EMBED_PROVIDER` controls how the FAISS pipeline gets its vectors:
+- `sentence-transformers` (default) — local HuggingFace model.
+- `openai` — call your endpoint's `/v1/embeddings`. Reuses LLM auth by default; override with `EMBED_API_BASE` / `EMBED_API_KEY_HEADER` / `EMBED_CA_BUNDLE` if your embedder lives elsewhere.
+
+**Important:** the committed `index/faiss.index` was built with `BAAI/bge-small-en-v1.5` (384-dim). Switching `EMBED_MODEL` or `EMBED_PROVIDER` means rebuilding it: `PYTHONPATH=. python scripts/build_index.py rag`.
 
 ## Public deployment
 
