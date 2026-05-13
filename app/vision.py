@@ -163,6 +163,9 @@ def _describe(image_bytes: bytes, prompt: str) -> str:
         return _desc_cache[h]
     b64 = base64.b64encode(image_bytes).decode("ascii")
     client = get_vision_client()
+    # Some local servers default to a small max_tokens (~200) which truncates
+    # tables / long lists. Allow override via env, otherwise be generous.
+    max_tokens = int(os.environ.get("VISION_MAX_TOKENS", "4096"))
     resp = client.chat.completions.create(
         model=_vision_model(),
         messages=[{
@@ -173,23 +176,44 @@ def _describe(image_bytes: bytes, prompt: str) -> str:
             ],
         }],
         temperature=0.0,
+        max_tokens=max_tokens,
     )
     text = (resp.choices[0].message.content or "").strip()
     _desc_cache[h] = text
     return text
 
 
+# IMPORTANT: this prompt demands COMPLETENESS for text-heavy images. The
+# previous "describe in 2-3 sentences" version caused tables and lists to
+# be summarized (e.g. a holidays table → "a few holidays"). The new prompt
+# treats transcription as the default and only allows summary for purely
+# visual content (photos, diagrams without labels).
 _DESCRIBE_PROMPT = (
-    "Describe what this image shows in 2-3 sentences. If it contains text "
-    "(chart axis labels, captions, etc.) include the relevant numbers and "
-    "labels verbatim. If it's a chart or graph, state the chart type, what "
-    "is being compared, and any notable values or trends. Do not add commentary."
+    "Examine this image in full detail.\n\n"
+    "RULES:\n"
+    "1. If the image contains ANY text, table, list, or structured data: "
+    "transcribe it COMPLETELY and VERBATIM. Do not summarize, omit, abbreviate, "
+    "or paraphrase. Include every row of every table, every item of every list, "
+    "every label and value.\n"
+    "2. Render tables using GitHub-flavored markdown. Preserve column order and "
+    "row order exactly as shown.\n"
+    "3. For charts/graphs: include the chart type, axis labels, legend entries, "
+    "and every data value or label that's visible. Then add one sentence summarizing "
+    "the trend.\n"
+    "4. For diagrams: enumerate every labeled element and every connection/arrow.\n"
+    "5. Only for photos or images with NO text and NO structured data: describe "
+    "the scene in 2-3 sentences.\n\n"
+    "Do not add framing like 'This image shows...' — just produce the content. "
+    "Do not stop early; long output is expected for content-dense images."
 )
 
 _TRANSCRIBE_PROMPT = (
-    "Transcribe ALL text visible on this page exactly as it appears, "
-    "preserving paragraph breaks, headings, and table structure (use "
-    "markdown tables for tabular data). Do not summarize or paraphrase."
+    "Transcribe ALL text visible on this page exactly as it appears, COMPLETELY "
+    "and VERBATIM. Do not summarize, paraphrase, or omit any line. Preserve "
+    "paragraph breaks, headings, and table structure (use GitHub-flavored "
+    "markdown tables for tabular data). Include every row of every table and "
+    "every item of every list. Stop only when you have transcribed everything "
+    "visible on the page."
 )
 
 
