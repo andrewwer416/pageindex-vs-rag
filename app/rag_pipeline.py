@@ -15,6 +15,7 @@ import tiktoken
 from . import config
 from .llm import complete
 from .embed import get_embedder  # re-exported for callers that imported from here
+from .extraction import extract_pages_with_tables
 
 __all__ = ["get_embedder", "pdf_to_chunks", "build_faiss_index", "load_index", "retrieve", "answer"]
 
@@ -24,13 +25,12 @@ _enc = tiktoken.get_encoding("cl100k_base")
 
 def _read_pages(source_path: Path) -> list[tuple[int, str]]:
     """Return [(page_num, text), …]. For non-PDF formats we treat the whole
-    document as 'page 1' so the rest of the chunking logic stays uniform."""
+    document as 'page 1' so the rest of the chunking logic stays uniform.
+    PDF tables are preserved as inline markdown so the LLM sees structure."""
     ext = source_path.suffix.lower()
     if ext == ".pdf":
-        doc = pymupdf.open(source_path)
-        pages = [(i + 1, page.get_text() or "") for i, page in enumerate(doc)]
-        doc.close()
-        return pages
+        page_texts = extract_pages_with_tables(source_path)
+        return [(i + 1, t) for i, t in enumerate(page_texts)]
     text = source_path.read_text(encoding="utf-8", errors="replace")
     return [(1, text)] if text.strip() else []
 

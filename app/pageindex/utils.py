@@ -439,29 +439,22 @@ def add_preface_if_needed(data):
 
 
 def get_page_tokens(pdf_path, model=None, pdf_parser="PyPDF2"):
-    if pdf_parser == "PyPDF2":
-        pdf_reader = PyPDF2.PdfReader(pdf_path)
-        page_list = []
-        for page_num in range(len(pdf_reader.pages)):
-            page = pdf_reader.pages[page_num]
-            page_text = page.extract_text()
-            token_length = count_tokens(page_text, model=model)
-            page_list.append((page_text, token_length))
-        return page_list
-    elif pdf_parser == "PyMuPDF":
-        if isinstance(pdf_path, BytesIO):
-            pdf_stream = pdf_path
-            doc = pymupdf.open(stream=pdf_stream, filetype="pdf")
-        elif isinstance(pdf_path, str) and os.path.isfile(pdf_path) and pdf_path.lower().endswith(".pdf"):
-            doc = pymupdf.open(pdf_path)
-        page_list = []
-        for page in doc:
-            page_text = page.get_text()
-            token_length = count_tokens(page_text, model=model)
-            page_list.append((page_text, token_length))
-        return page_list
+    """Patched: always use table-aware extraction (regardless of pdf_parser arg)
+    so the tree-builder sees tables as markdown instead of flattened cell text."""
+    from app.extraction import extract_pages_with_tables
+    if isinstance(pdf_path, BytesIO):
+        # The table extractor needs a path; spill the bytes to a temp file.
+        import tempfile, pathlib
+        tmp = pathlib.Path(tempfile.mkstemp(suffix=".pdf")[1])
+        tmp.write_bytes(pdf_path.getvalue())
+        page_texts = extract_pages_with_tables(tmp)
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
     else:
-        raise ValueError(f"Unsupported PDF parser: {pdf_parser}")
+        page_texts = extract_pages_with_tables(pdf_path)
+    return [(t, count_tokens(t, model=model)) for t in page_texts]
 
         
 

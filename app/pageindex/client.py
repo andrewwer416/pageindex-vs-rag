@@ -72,12 +72,11 @@ class PageIndexClient:
                 if_add_node_id='yes',
                 if_add_doc_description='yes'
             )
-            # Extract per-page text so queries don't need the original PDF
-            pages = []
-            with open(file_path, 'rb') as f:
-                pdf_reader = PyPDF2.PdfReader(f)
-                for i, page in enumerate(pdf_reader.pages, 1):
-                    pages.append({'page': i, 'content': page.extract_text() or ''})
+            # Extract per-page text so queries don't need the original PDF.
+            # Use the table-aware extractor so cached pages have markdown tables.
+            from app.extraction import extract_pages_with_tables
+            page_texts = extract_pages_with_tables(file_path)
+            pages = [{'page': i + 1, 'content': t} for i, t in enumerate(page_texts)]
 
             self.documents[doc_id] = {
                 'id': doc_id,
