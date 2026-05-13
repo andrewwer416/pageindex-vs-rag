@@ -71,8 +71,11 @@ else:
             else f"{doc.get('ext', '?')} file"
         )
         if col4.button("🗑️", key=f"del_{doc['doc_id']}", help="Delete this document and its indices"):
-            library.delete_document(doc["doc_id"])
-            st.rerun()
+            ok, msg = library.delete_document(doc["doc_id"])
+            if msg:
+                (st.warning if ok else st.error)(msg)
+            if ok:
+                st.rerun()
         if doc.get("error"):
             st.error(doc["error"])
         st.markdown("---")

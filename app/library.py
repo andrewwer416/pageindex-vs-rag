@@ -71,11 +71,13 @@ def meta_path(doc_id: str) -> Path:
 # ---------- CRUD ----------
 
 def list_documents() -> list[dict]:
-    """Return one meta dict per document, newest first."""
+    """Return one meta dict per document, newest first.
+    Skips `.trash-*` dirs left behind by failed Windows deletes."""
     LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
+    _gc_trash()  # opportunistic cleanup
     out: list[dict] = []
     for child in LIBRARY_DIR.iterdir():
-        if not child.is_dir():
+        if not child.is_dir() or child.name.startswith(".trash-"):
             continue
         try:
             meta = json.loads((child / "meta.json").read_text())
@@ -132,10 +134,62 @@ def add_document(file_bytes: bytes, original_filename: str) -> str:
     return doc_id
 
 
-def delete_document(doc_id: str) -> None:
+def delete_document(doc_id: str) -> tuple[bool, str]:
+    """Remove a document directory. Returns (ok, message).
+
+    On Windows it's common for a file inside the doc dir to be held open by
+    streamlit's filewatcher, the OS search-indexer, or AV — `shutil.rmtree`
+    then raises PermissionError on the first locked file and leaves the rest
+    behind. Strategy:
+      1. Try a normal rmtree (works on Linux always, and on Windows when
+         no locks remain).
+      2. On Windows: retry a few times with a short delay.
+      3. As a last resort, rename the directory to `.trash-<doc_id>` so it
+         disappears from list_documents() even if the OS can't free the
+         bytes right now. Trash dirs are cleaned up on the next library
+         operation.
+    """
+    import time
     d = doc_dir(doc_id)
-    if d.exists():
-        shutil.rmtree(d)
+    if not d.exists():
+        return True, ""
+
+    _gc_trash()  # opportunistic cleanup of previous failed deletes
+
+    last_err = None
+    for attempt in range(4):
+        try:
+            shutil.rmtree(d)
+            return True, ""
+        except (OSError, PermissionError) as e:
+            last_err = e
+            time.sleep(0.25 * (attempt + 1))
+
+    # Fall back: rename so the doc disappears from list_documents() even if
+    # the bytes can't be freed yet.
+    try:
+        trash = LIBRARY_DIR / f".trash-{doc_id}"
+        d.rename(trash)
+        return True, (
+            "Files are still held open by another process (likely streamlit's "
+            "file watcher on Windows). The document was renamed and will be "
+            "fully removed the next time the library is opened after a "
+            "restart. The doc is hidden from the library now."
+        )
+    except (OSError, PermissionError):
+        return False, f"Could not delete {doc_id}: {last_err!r}"
+
+
+def _gc_trash() -> None:
+    """Best-effort sweep of `.trash-*` dirs left over from prior failed deletes."""
+    LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
+    for child in LIBRARY_DIR.iterdir():
+        if not child.is_dir() or not child.name.startswith(".trash-"):
+            continue
+        try:
+            shutil.rmtree(child)
+        except (OSError, PermissionError):
+            pass
 
 
 # ---------- indexing ----------
