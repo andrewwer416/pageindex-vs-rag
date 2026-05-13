@@ -76,6 +76,14 @@ docker compose up -d --build      # exposes http://localhost:8501
 PYTHONPATH=. streamlit run app/app.py
 ```
 
+The app is a multi-page Streamlit app. The sidebar has:
+
+- **app** (main page) — the side-by-side comparison on the bundled Tesla 10-K.
+- **Upload Document** — drop in your own PDF / Markdown / TXT; both indices are built once at upload time.
+- **Compare Custom** — pick a doc from your library and run the same side-by-side comparison on questions you write.
+
+PageIndex indexing of a new document takes "many LLM calls" worth of time — typically tens of minutes on local hardware. The upload page blocks while it runs and shows live progress.
+
 ## LLM backend choices
 
 The default `.env.example` targets Ollama. To swap backends, change the model prefix and `LLM_API_BASE`:

@@ -1,4 +1,9 @@
-"""Traditional vector RAG: chunk PDF, embed with sentence-transformers, query via FAISS."""
+"""Traditional vector RAG: chunk PDF/MD/TXT, embed, query via FAISS.
+
+All public functions optionally accept paths so they can target either the
+bundled Tesla-10K indices (the defaults, in config.*) or a user-uploaded doc's
+indices stored under the library.
+"""
 import json
 from pathlib import Path
 
@@ -11,19 +16,28 @@ from . import config
 from .llm import complete
 from .embed import get_embedder  # re-exported for callers that imported from here
 
-# Keep the historical export name working
 __all__ = ["get_embedder", "pdf_to_chunks", "build_faiss_index", "load_index", "retrieve", "answer"]
 
 
 _enc = tiktoken.get_encoding("cl100k_base")
 
 
-def pdf_to_chunks(pdf_path: Path) -> list[dict]:
-    """Split PDF into ~CHUNK_TOKENS chunks with overlap, page-aware."""
-    doc = pymupdf.open(pdf_path)
-    pages = [(i + 1, page.get_text() or "") for i, page in enumerate(doc)]
-    doc.close()
+def _read_pages(source_path: Path) -> list[tuple[int, str]]:
+    """Return [(page_num, text), …]. For non-PDF formats we treat the whole
+    document as 'page 1' so the rest of the chunking logic stays uniform."""
+    ext = source_path.suffix.lower()
+    if ext == ".pdf":
+        doc = pymupdf.open(source_path)
+        pages = [(i + 1, page.get_text() or "") for i, page in enumerate(doc)]
+        doc.close()
+        return pages
+    text = source_path.read_text(encoding="utf-8", errors="replace")
+    return [(1, text)] if text.strip() else []
 
+
+def pdf_to_chunks(source_path: Path) -> list[dict]:
+    """Split a document into ~CHUNK_TOKENS chunks with overlap, page-aware (when PDF)."""
+    pages = _read_pages(Path(source_path))
     chunks: list[dict] = []
     buf_tokens: list[int] = []
     buf_pages: list[int] = []
@@ -63,7 +77,7 @@ def _overlap_tail(buf_tokens: list[int], buf_pages: list[int]) -> tuple[list[int
     return buf_tokens[-n:], buf_pages[-n:]
 
 
-def build_faiss_index(chunks: list[dict]) -> None:
+def build_faiss_index(chunks: list[dict], faiss_path: Path | None = None, chunks_path: Path | None = None) -> None:
     embedder = get_embedder()
     embeddings = embedder.encode(
         [c["text"] for c in chunks],
@@ -73,23 +87,28 @@ def build_faiss_index(chunks: list[dict]) -> None:
     ).astype(np.float32)
     index = faiss.IndexFlatIP(embeddings.shape[1])
     index.add(embeddings)
-    config.INDEX_DIR.mkdir(parents=True, exist_ok=True)
-    faiss.write_index(index, str(config.FAISS_PATH))
-    with open(config.CHUNKS_PATH, "w") as f:
+    fp = Path(faiss_path) if faiss_path else config.FAISS_PATH
+    cp = Path(chunks_path) if chunks_path else config.CHUNKS_PATH
+    fp.parent.mkdir(parents=True, exist_ok=True)
+    cp.parent.mkdir(parents=True, exist_ok=True)
+    faiss.write_index(index, str(fp))
+    with open(cp, "w") as f:
         json.dump(chunks, f)
     print(f"FAISS index: {embeddings.shape[0]} vectors, dim={embeddings.shape[1]}")
 
 
-def load_index() -> tuple[faiss.Index, list[dict]]:
-    index = faiss.read_index(str(config.FAISS_PATH))
-    with open(config.CHUNKS_PATH) as f:
+def load_index(faiss_path: Path | None = None, chunks_path: Path | None = None) -> tuple[faiss.Index, list[dict]]:
+    fp = Path(faiss_path) if faiss_path else config.FAISS_PATH
+    cp = Path(chunks_path) if chunks_path else config.CHUNKS_PATH
+    index = faiss.read_index(str(fp))
+    with open(cp) as f:
         chunks = json.load(f)
     return index, chunks
 
 
-def retrieve(query: str, k: int = config.RAG_TOP_K) -> list[dict]:
+def retrieve(query: str, k: int = config.RAG_TOP_K, faiss_path: Path | None = None, chunks_path: Path | None = None) -> list[dict]:
     """Top-k chunks with similarity scores."""
-    index, chunks = load_index()
+    index, chunks = load_index(faiss_path=faiss_path, chunks_path=chunks_path)
     embedder = get_embedder()
     q_emb = embedder.encode([query], normalize_embeddings=True).astype(np.float32)
     scores, ids = index.search(q_emb, k)
@@ -103,25 +122,38 @@ def retrieve(query: str, k: int = config.RAG_TOP_K) -> list[dict]:
     return out
 
 
-RAG_SYSTEM_PROMPT = """You are a financial-research assistant answering questions about Tesla's 2024 10-K filing.
-You have been given a small set of retrieved text chunks from the document.
-Answer the user's question using only those chunks. Cite the page numbers (e.g. "[p. 32]") for every claim.
-If the chunks do not contain the answer, say so explicitly — do not guess."""
+def _rag_system_prompt(doc_name: str | None) -> str:
+    target = f"about **{doc_name}**" if doc_name else "about the provided document"
+    return (
+        f"You are a research assistant answering questions {target}.\n"
+        "You have been given a small set of retrieved text chunks from the document.\n"
+        "Answer the user's question using only those chunks. Cite the page numbers "
+        "(e.g. \"[p. 32]\") for every claim. If the chunks do not contain the answer, "
+        "say so explicitly — do not guess."
+    )
 
 
-def answer(query: str, k: int = config.RAG_TOP_K) -> dict:
+def answer(
+    query: str,
+    k: int = config.RAG_TOP_K,
+    faiss_path: Path | None = None,
+    chunks_path: Path | None = None,
+    doc_name: str | None = None,
+) -> dict:
     """Run the full trad-RAG pipeline: retrieve → generate. Returns trace + answer."""
-    hits = retrieve(query, k=k)
+    hits = retrieve(query, k=k, faiss_path=faiss_path, chunks_path=chunks_path)
     context_blocks = []
     for h in hits:
         page_label = f"p. {h['page_start']}" if h["page_start"] == h["page_end"] else f"pp. {h['page_start']}-{h['page_end']}"
         context_blocks.append(f"[{page_label}, similarity={h['score']:.3f}]\n{h['text']}")
     context = "\n\n---\n\n".join(context_blocks)
     user_prompt = f"Question: {query}\n\nRetrieved chunks:\n{context}\n\nAnswer with citations."
+    if doc_name is None:
+        doc_name = config.DOC_NAME
     result = complete(
         model=config.ANSWER_MODEL,
         messages=[
-            {"role": "system", "content": RAG_SYSTEM_PROMPT},
+            {"role": "system", "content": _rag_system_prompt(doc_name)},
             {"role": "user", "content": user_prompt},
         ],
     )

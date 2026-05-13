@@ -7,8 +7,9 @@ Flow:
   1. PLAN  : show the model the document tree, ask it to pick page ranges relevant to the question.
   2. ANSWER: fetch those pages, ask the model to answer using only that content.
 
-Each step exposes its `thinking` (DeepSeek-R1 <think> blocks) and its `answer` text,
-so the UI can render the human-like reasoning trace.
+All public functions optionally accept (workspace, doc_id) so they can target
+either the bundled Tesla-10K tree (defaults from config) or any user-uploaded
+document's tree under the library.
 """
 import json
 import re
@@ -27,42 +28,47 @@ if str(_APP_DIR) not in sys.path:
 from pageindex import PageIndexClient
 
 
-_client: PageIndexClient | None = None
+# Cache one PageIndexClient per workspace path (different libraries = different clients).
+_clients: dict[str, PageIndexClient] = {}
 
 
-def get_client() -> PageIndexClient:
-    global _client
-    if _client is None:
-        config.PAGEINDEX_WORKSPACE.mkdir(parents=True, exist_ok=True)
-        _client = PageIndexClient(
-            workspace=str(config.PAGEINDEX_WORKSPACE),
-            model=config.INDEX_MODEL,
-        )
-    return _client
+def get_client(workspace: Path | str | None = None) -> PageIndexClient:
+    ws = str(workspace) if workspace else str(config.PAGEINDEX_WORKSPACE)
+    if ws not in _clients:
+        Path(ws).mkdir(parents=True, exist_ok=True)
+        _clients[ws] = PageIndexClient(workspace=ws, model=config.INDEX_MODEL)
+    return _clients[ws]
 
 
-def load_doc_id() -> str:
-    return config.PAGEINDEX_DOC_ID_FILE.read_text().strip()
+def load_doc_id(doc_id_file: Path | str | None = None) -> str:
+    p = Path(doc_id_file) if doc_id_file else config.PAGEINDEX_DOC_ID_FILE
+    return p.read_text().strip()
 
 
-PLAN_SYSTEM_PROMPT = """You are PageIndex, a document QA assistant for Tesla's 2024 10-K.
-You navigate the document like a human expert: read the table-of-contents tree, identify
-which sections are likely to answer the question, then read only those pages.
+def _plan_system_prompt(doc_name: str | None) -> str:
+    target = f"**{doc_name}**" if doc_name else "the provided document"
+    return (
+        f"You are PageIndex, a document QA assistant for {target}.\n"
+        "You navigate the document like a human expert: read the table-of-contents tree, identify "
+        "which sections are likely to answer the question, then read only those pages.\n\n"
+        "Given the document tree, return a JSON object with the page ranges you want to read.\n"
+        "Pick TIGHT ranges (rarely more than ~20 pages total). Prefer specific sections over broad ones.\n\n"
+        "Reply format (a single JSON object, nothing else):\n"
+        "{\n"
+        "  \"reasoning\": \"<one or two sentences on which sections are relevant and why>\",\n"
+        "  \"pages\": \"5-7,12,18-20\"\n"
+        "}"
+    )
 
-Given the document tree, return a JSON object with the page ranges you want to read.
-Pick TIGHT ranges (rarely more than ~20 pages total). Prefer specific sections over broad ones.
 
-Reply format (a single JSON object, nothing else):
-{
-  "reasoning": "<one or two sentences on which sections are relevant and why>",
-  "pages": "5-7,12,18-20"
-}
-"""
-
-ANSWER_SYSTEM_PROMPT = """You are PageIndex, a document QA assistant for Tesla's 2024 10-K.
-You have been given the text of the pages you selected. Answer the user's question using
-only that content. Cite the page numbers (e.g. "[p. 32]") for every claim. If the pages do
-not contain the answer, say so explicitly — do not guess."""
+def _answer_system_prompt(doc_name: str | None) -> str:
+    target = f"**{doc_name}**" if doc_name else "the provided document"
+    return (
+        f"You are PageIndex, a document QA assistant for {target}.\n"
+        "You have been given the text of the pages you selected. Answer the user's question using\n"
+        "only that content. Cite the page numbers (e.g. \"[p. 32]\") for every claim. If the pages do\n"
+        "not contain the answer, say so explicitly — do not guess."
+    )
 
 
 _PAGES_RE = re.compile(r"\d+(?:\s*-\s*\d+)?")
@@ -73,10 +79,8 @@ def _extract_json_loose(text: str) -> dict:
     text = text.strip()
     if not text:
         return {}
-    # Try fenced first
     fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     candidate = fence.group(1) if fence else text
-    # Find the outermost {...}
     start = candidate.find("{")
     end = candidate.rfind("}")
     if start == -1 or end == -1 or end < start:
@@ -121,10 +125,19 @@ def _sanitize_pages(pages: str, max_total: int = 30) -> str:
     return ",".join(parts)
 
 
-def answer(query: str) -> dict:
+def answer(
+    query: str,
+    workspace: Path | str | None = None,
+    doc_id: str | None = None,
+    doc_id_file: Path | str | None = None,
+    doc_name: str | None = None,
+) -> dict:
     """Run the 2-step tree walk and return a structured trace."""
-    client = get_client()
-    doc_id = load_doc_id()
+    client = get_client(workspace=workspace)
+    if doc_id is None:
+        doc_id = load_doc_id(doc_id_file=doc_id_file)
+    if doc_name is None:
+        doc_name = config.DOC_NAME
     structure_json = client.get_document_structure(doc_id)
 
     # Step 1: PLAN
@@ -136,7 +149,7 @@ def answer(query: str) -> dict:
     plan_result = complete(
         model=config.RETRIEVE_MODEL,
         messages=[
-            {"role": "system", "content": PLAN_SYSTEM_PROMPT},
+            {"role": "system", "content": _plan_system_prompt(doc_name)},
             {"role": "user", "content": plan_user},
         ],
     )
@@ -145,7 +158,6 @@ def answer(query: str) -> dict:
     plan_reasoning = plan.get("reasoning", "").strip()
 
     if not pages:
-        # Fallback: ask the model again with a tighter instruction
         return {
             "steps": [{
                 "name": "plan",
@@ -173,7 +185,7 @@ def answer(query: str) -> dict:
     answer_result = complete(
         model=config.RETRIEVE_MODEL,
         messages=[
-            {"role": "system", "content": ANSWER_SYSTEM_PROMPT},
+            {"role": "system", "content": _answer_system_prompt(doc_name)},
             {"role": "user", "content": answer_user},
         ],
     )
@@ -200,8 +212,13 @@ def answer(query: str) -> dict:
     }
 
 
-def get_tree_structure() -> dict:
+def get_tree_structure(
+    workspace: Path | str | None = None,
+    doc_id: str | None = None,
+    doc_id_file: Path | str | None = None,
+) -> dict:
     """For the UI: return the parsed tree dict."""
-    client = get_client()
-    doc_id = load_doc_id()
+    client = get_client(workspace=workspace)
+    if doc_id is None:
+        doc_id = load_doc_id(doc_id_file=doc_id_file)
     return json.loads(client.get_document_structure(doc_id))
