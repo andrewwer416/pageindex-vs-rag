@@ -103,6 +103,9 @@ if os.environ.get("SHOW_SYSTEM_STATUS", "true").lower() != "false":
         st.markdown("**Embedding transport**:")
         from app.embed import describe_embed_config
         st.json(describe_embed_config())
+        st.markdown("**Vision (VLM) transport**:")
+        from app.vision import describe_vision_config
+        st.json(describe_vision_config())
 
 st.markdown("---")
 st.markdown("**Try a sample question, or write your own:**")

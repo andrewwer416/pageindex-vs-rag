@@ -92,11 +92,22 @@ def _extract_page(page) -> str:
     parts = [cleaned.strip()] + [
         f"\n\n[TABLE]\n{md}\n[/TABLE]\n" for md in markdowns
     ]
-    return "\n\n".join(p for p in parts if p)
+    base_text = "\n\n".join(p for p in parts if p)
+
+    # Optional: enrich with VLM image descriptions if VISION_ENABLED.
+    try:
+        from .vision import enrich_page_text, is_enabled as _vision_on
+        if _vision_on():
+            return enrich_page_text(page, base_text)
+    except Exception as e:
+        # Never fail extraction because of vision side issues.
+        return base_text + f"\n\n[VISION_LOAD_ERROR: {e!r}]\n"
+    return base_text
 
 
 def extract_pages_with_tables(pdf_path: Path | str) -> list[str]:
-    """Return [page_text_with_tables_as_markdown, …] for a PDF."""
+    """Return [page_text_with_tables_as_markdown, …] for a PDF.
+    If VISION_ENABLED, image regions are also described inline by a VLM."""
     doc = pymupdf.open(str(pdf_path))
     out = [_extract_page(p) for p in doc]
     doc.close()

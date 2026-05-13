@@ -84,6 +84,11 @@ The app is a multi-page Streamlit app. The sidebar has:
 
 PageIndex indexing of a new document takes "many LLM calls" worth of time — typically tens of minutes on local hardware. The upload page blocks while it runs and shows live progress.
 
+### Tables and images
+
+- **Tables** in PDFs are detected via pymupdf and rendered as markdown inline in each page's text. Both pipelines get structured tables; no extra config needed.
+- **Images** (scanned pages, charts, diagrams, screenshots) are *optional*. Set `VISION_ENABLED=true` and `VISION_MODEL=<your-vision-model>` in `.env` to send each image to a vision-language model at index time. The description is injected into the page text so retrieval finds the image's content. All `VISION_*` settings fall back to the corresponding `LLM_*` value, so a single endpoint serving chat + vision needs no extra config beyond `VISION_ENABLED=true`.
+
 ## LLM backend choices
 
 The default `.env.example` targets Ollama. To swap backends, change the model prefix and `LLM_API_BASE`:

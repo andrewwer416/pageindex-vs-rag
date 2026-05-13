@@ -17,6 +17,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from app import config, library  # noqa: E402
+from app.vision import is_enabled as vision_enabled  # noqa: E402
 
 
 st.set_page_config(page_title="Upload — PageIndex vs RAG", layout="wide")
@@ -26,6 +27,20 @@ st.caption(
     "PageIndex tree) are built once at upload time. After that the document shows "
     "up under **Compare Custom** for side-by-side querying."
 )
+
+if vision_enabled():
+    st.success(
+        "🖼️ **Vision processing is ON.** During indexing each image will be sent "
+        "to your vision model and its description will be injected into the "
+        "page text — scanned pages, charts, and diagrams become queryable. "
+        "Adds one VLM call per image to indexing time."
+    )
+else:
+    st.info(
+        "🖼️ Vision processing is **off**. Tables are still parsed structurally, "
+        "but images, charts, and scanned-only pages are skipped. To enable, set "
+        "`VISION_ENABLED=true` (and a `VISION_MODEL`) in `.env` and restart."
+    )
 
 
 # ──────────────── existing library ─────────────────────────────────────────────
