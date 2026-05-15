@@ -7,14 +7,9 @@ __pycache__/
 # Local config
 .env
 
-# Generated source files
-data/*.pdf
-data/*.htm
-
-# (PageIndex tree workspace is now committed pre-built — see index/pageindex_workspace/)
-
-# User-uploaded documents and their per-doc indices. Local-only by design.
-index/library/
+# All generated/indexed data is per-user, never committed
+index/
+data/
 
 # Personal deployment configs (kept on the dev machine, not in the repo)
 compose.dick.yaml

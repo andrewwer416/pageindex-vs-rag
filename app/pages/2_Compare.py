@@ -1,5 +1,6 @@
-"""Compare-Custom page: pick a doc from the library and run the same side-by-side
-comparison the main page does for the Tesla 10-K — but pointed at your doc.
+"""Compare page: pick a doc from your library and run side-by-side comparison of
+Traditional RAG vs PageIndex on it. Also surfaces the PageIndex hierarchy tree
+that was extracted at indexing time.
 """
 import os
 import sys
@@ -18,8 +19,8 @@ from app.rag_pipeline import answer as rag_answer  # noqa: E402
 from app.pageindex_agent import answer as pi_answer, get_tree_structure  # noqa: E402
 
 
-st.set_page_config(page_title="Compare Custom — PageIndex vs RAG", layout="wide")
-st.title("Compare on your own document")
+st.set_page_config(page_title="Compare — PageIndex vs RAG", layout="wide")
+st.title("Compare on your document")
 
 # ──────────────── doc picker ───────────────────────────────────────────────────
 
@@ -28,8 +29,8 @@ ready_docs = [d for d in docs if d.get("status") in ("ready", "partial")]
 
 if not ready_docs:
     st.info(
-        "Your library is empty (or no documents are indexed yet). Upload a document "
-        "on the **Upload Document** page in the sidebar, wait for indexing to finish, "
+        "Your library is empty (or no documents are indexed yet). Open the **app** "
+        "page in the sidebar to upload a document, wait for indexing to finish, "
         "then come back here."
     )
     st.stop()
@@ -51,6 +52,41 @@ st.markdown(
 )
 if doc.get("status") == "partial":
     st.warning("PageIndex tree wasn't built for this doc — only the Traditional-RAG side will produce answers.")
+
+
+# ──────────────── document hierarchy ──────────────────────────────────────────
+
+if doc.get("status") == "ready":
+    with st.expander("📚 Document hierarchy (the tree PageIndex extracted)", expanded=False):
+        try:
+            tree = get_tree_structure(**{k: v for k, v in kw["pi"].items() if k != "doc_name"})
+        except Exception as e:
+            st.error(f"Could not load tree: {e!r}")
+            tree = None
+
+        if tree:
+            def _render(node, depth=0):
+                if isinstance(node, list):
+                    for n in node:
+                        _render(n, depth)
+                    return
+                title = node.get("title", "?")
+                page = node.get("physical_index") or node.get("start_index") or node.get("page_number")
+                page_str = f" — p. {page}" if page else ""
+                summary = node.get("summary") or ""
+                indent = "&nbsp;" * (depth * 4)
+                st.markdown(f"{indent}• **{title}**{page_str}")
+                if summary:
+                    st.markdown(f"{indent}&nbsp;&nbsp;&nbsp;&nbsp;_{summary[:300]}_")
+                for k, v in node.items():
+                    if k.startswith("nodes") and isinstance(v, list) and v:
+                        _render(v, depth + 1)
+            _render(tree)
+
+            with st.expander("Raw tree JSON"):
+                import json as _json
+                st.code(_json.dumps(tree, indent=2)[:20000], language="json")
+
 
 # Generic sample questions that work on most documents.
 SAMPLES = [
