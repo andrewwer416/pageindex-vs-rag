@@ -1,11 +1,12 @@
 # PageIndex vs Traditional RAG
 
-A side-by-side demo of two document-retrieval architectures on a document you upload:
+A side-by-side demo of three document-retrieval architectures on a document you upload:
 
 - **Traditional RAG** — chunk → embed → FAISS nearest-neighbor → answer.
 - **PageIndex** — build a hierarchical table-of-contents tree once at indexing time, then at query time let an LLM reason over the tree to pick which sections to read, then read only those pages.
+- **GraphRAG (LlamaIndex)** — extract entities + relationships per chunk, build a knowledge graph, detect communities with hierarchical Leiden, and answer by aggregating per-community responses. Implements the [LlamaIndex GraphRAG v1 cookbook](https://developers.llamaindex.ai/python/examples/cookbooks/graphrag_v1/).
 
-The point isn't "X wins." Each architecture wins on a different question shape. The UI shows the reasoning trace from both pipelines side by side so the difference is visible, plus the extracted document hierarchy.
+The point isn't "X wins." Each architecture wins on a different question shape. The UI shows the answer + reasoning trace from all three pipelines as tabs so the difference is visible, plus the extracted document hierarchy.
 
 ## How it works
 
@@ -56,8 +57,8 @@ docker compose up -d --build      # exposes http://localhost:8501
 
 The Streamlit app has two pages in the sidebar:
 
-- **app** — Library page. Upload a PDF, Markdown, or plain-text document. Both indices (FAISS for RAG + PageIndex tree) are built once at upload time; expect "many LLM calls" worth of time (tens of minutes on local hardware). Live progress is shown.
-- **Compare** — pick an indexed document, see the extracted hierarchy tree, run queries through both pipelines side by side.
+- **app** — Library page. Upload a PDF, Markdown, or plain-text document. Three indices (FAISS for RAG + PageIndex tree + GraphRAG knowledge graph) are built once at upload time; expect "many LLM calls" worth of time (tens of minutes on local hardware). Live progress is shown.
+- **Compare** — pick an indexed document, see the extracted hierarchy tree, run queries through all three pipelines as tabs.
 
 ## LLM backend choices
 

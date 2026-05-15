@@ -72,12 +72,25 @@ if uploaded is not None:
                 elif phase == "pageindex":
                     status.write(
                         f"[{elapsed:6.1f}s] 🌳 building PageIndex tree "
-                        "(many LLM calls — this is the slow phase)"
+                        "(many LLM calls — slow phase)"
                     )
+                elif phase == "graphrag":
+                    status.write(
+                        f"[{elapsed:6.1f}s] 🕸️ building GraphRAG: entity extraction + community summaries"
+                    )
+                elif phase == "graphrag-done":
+                    status.write(
+                        f"[{elapsed:6.1f}s] ✅ GraphRAG: {info.get('n_chunks','?')} chunks, "
+                        f"{info.get('n_entities','?')} entities, {info.get('n_communities','?')} communities"
+                    )
+                elif phase == "graphrag-failed":
+                    status.write(f"[{elapsed:6.1f}s] ⚠️ GraphRAG: {info.get('error', '')}")
+                elif phase == "graphrag-skipped":
+                    status.write(f"[{elapsed:6.1f}s] ⏭️ GraphRAG skipped (GRAPHRAG_ENABLED=false)")
                 elif phase == "done":
                     status.write(
-                        f"[{elapsed:6.1f}s] ✅ done — {info.get('page_count') or '?'} pages, "
-                        f"PageIndex doc_id={info.get('pi_doc_id')}"
+                        f"[{elapsed:6.1f}s] ✅ PageIndex done — {info.get('page_count') or '?'} pages, "
+                        f"doc_id={info.get('pi_doc_id')}"
                     )
                 elif phase == "failed":
                     status.write(f"[{elapsed:6.1f}s] ❌ {info.get('error')}")
@@ -116,17 +129,24 @@ else:
             "partial": "⚠️ partial (RAG only)",
             "rag-indexing": "⏳ indexing (RAG)",
             "pageindex-indexing": "⏳ indexing (PageIndex tree)",
+            "graphrag-indexing": "⏳ indexing (GraphRAG)",
             "uploaded": "🆕 uploaded",
             "failed": "❌ failed",
         }.get(status, status)
+        # Mark which pipelines this doc has built indices for.
+        flags = []
+        if (library.faiss_path(doc["doc_id"])).exists(): flags.append("RAG")
+        if (library.pageindex_doc_id_file(doc["doc_id"])).exists(): flags.append("PageIndex")
+        if library.has_graphrag(doc["doc_id"]): flags.append("GraphRAG")
+        pipelines_str = " · ".join(flags) if flags else "—"
 
-        col1, col2, col3, col4 = st.columns([5, 2, 2, 1])
+        col1, col2, col3, col4 = st.columns([4, 2, 3, 1])
         col1.markdown(f"**{doc.get('name', '?')}**  \n`{doc['doc_id']}`")
         col2.markdown(f"_{badge}_")
         col3.markdown(
-            f"{doc.get('page_count') or '—'} pages"
-            if doc.get("ext") == ".pdf"
-            else f"{doc.get('ext', '?')} file"
+            (f"{doc.get('page_count') or '—'} pages · "
+             if doc.get('ext') == '.pdf' else f"{doc.get('ext', '?')} file · ")
+            + pipelines_str
         )
         if col4.button("🗑️", key=f"del_{doc['doc_id']}", help="Delete this document and its indices"):
             ok, msg = library.delete_document(doc["doc_id"])
@@ -152,3 +172,6 @@ if os.environ.get("SHOW_SYSTEM_STATUS", "true").lower() != "false":
         st.markdown("**Vision (VLM) transport**:")
         from app.vision import describe_vision_config
         st.json(describe_vision_config())
+        st.markdown("**GraphRAG transport**:")
+        from app.graphrag_pipeline import describe_graphrag_config
+        st.json(describe_graphrag_config())

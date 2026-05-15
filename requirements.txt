@@ -10,3 +10,8 @@ streamlit
 numpy
 tiktoken
 weasyprint
+llama-index-core
+llama-index-llms-openai
+llama-index-embeddings-openai
+graspologic
+networkx

@@ -64,6 +64,10 @@ def pageindex_doc_id_file(doc_id: str) -> Path:
     return doc_dir(doc_id) / "pageindex_doc_id.txt"
 
 
+def graphrag_dir(doc_id: str) -> Path:
+    return doc_dir(doc_id) / "graphrag"
+
+
 def meta_path(doc_id: str) -> Path:
     return doc_dir(doc_id) / "meta.json"
 
@@ -273,22 +277,64 @@ def build_indices(
         _write_meta(doc_id, status="partial", error=msg)
         _p("failed", error=msg)
 
+    # ----- 3. GraphRAG (knowledge-graph) index — optional / best-effort -----
+    if os.environ.get("GRAPHRAG_ENABLED", "true").strip().lower() != "false":
+        try:
+            from . import graphrag_pipeline
+            _p("graphrag", source=str(src))
+            _write_meta(doc_id, status="graphrag-indexing")
+            # Read the source's text once. For PDFs we already cached pages in
+            # the PageIndex workspace JSON, but to keep this independent we
+            # re-extract with the table-aware pipeline.
+            if meta["ext"] == ".pdf":
+                from .extraction import extract_pages_with_tables
+                doc_text = "\n\n".join(extract_pages_with_tables(src))
+            else:
+                doc_text = src.read_text(encoding="utf-8", errors="replace")
+            stats = graphrag_pipeline.build_index(
+                source_text=doc_text,
+                graphrag_dir=graphrag_dir(doc_id),
+            )
+            _p("graphrag-done", **stats)
+            _write_meta(
+                doc_id,
+                status="ready" if get_document(doc_id).get("status") != "partial" else "partial",
+                graphrag=stats,
+            )
+        except Exception as e:
+            msg = f"GraphRAG indexing failed: {e!r}"
+            _write_meta(doc_id, graphrag_error=msg)
+            _p("graphrag-failed", error=msg)
+    else:
+        _p("graphrag-skipped", reason="GRAPHRAG_ENABLED=false")
+
     return get_document(doc_id)
 
 
 def doc_kwargs(doc_id: str) -> dict:
-    """Convenience: returns the kwargs for rag_pipeline.answer / pageindex_agent.answer
-    pointed at this doc's indices."""
+    """Convenience: returns the kwargs for each pipeline pointed at this doc's
+    indices. The Compare page calls answer(**kw["rag"]) / answer(**kw["pi"]) /
+    answer(**kw["graphrag"])."""
     meta = get_document(doc_id)
+    name = meta.get("name") or doc_id
     return {
         "rag": {
             "faiss_path": faiss_path(doc_id),
             "chunks_path": chunks_path(doc_id),
-            "doc_name": meta.get("name") or doc_id,
+            "doc_name": name,
         },
         "pi": {
             "workspace": pageindex_workspace(doc_id),
             "doc_id_file": pageindex_doc_id_file(doc_id),
-            "doc_name": meta.get("name") or doc_id,
+            "doc_name": name,
+        },
+        "graphrag": {
+            "graphrag_dir": graphrag_dir(doc_id),
+            "doc_name": name,
         },
     }
+
+
+def has_graphrag(doc_id: str) -> bool:
+    """True if a GraphRAG index has been built and persisted for this doc."""
+    return (graphrag_dir(doc_id) / "community_summaries.json").exists()
