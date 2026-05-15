@@ -284,9 +284,6 @@ def build_indices(
             from . import graphrag_pipeline
             _p("graphrag", source=str(src))
             _write_meta(doc_id, status="graphrag-indexing")
-            # Read the source's text once. For PDFs we already cached pages in
-            # the PageIndex workspace JSON, but to keep this independent we
-            # re-extract with the table-aware pipeline.
             if meta["ext"] == ".pdf":
                 from .extraction import extract_pages_with_tables
                 doc_text = "\n\n".join(extract_pages_with_tables(src))
@@ -303,7 +300,13 @@ def build_indices(
                 graphrag=stats,
             )
         except Exception as e:
-            msg = f"GraphRAG indexing failed: {e!r}"
+            import traceback as _tb
+            tb_text = _tb.format_exc()
+            print("=" * 70, flush=True)
+            print("GraphRAG indexing failed — full traceback:", flush=True)
+            print(tb_text, flush=True)
+            print("=" * 70, flush=True)
+            msg = f"GraphRAG indexing failed: {type(e).__name__}: {e}\n\n{tb_text}"
             _write_meta(doc_id, graphrag_error=msg)
             _p("graphrag-failed", error=msg)
     else:

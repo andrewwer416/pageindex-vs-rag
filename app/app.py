@@ -84,7 +84,12 @@ if uploaded is not None:
                         f"{info.get('n_entities','?')} entities, {info.get('n_communities','?')} communities"
                     )
                 elif phase == "graphrag-failed":
-                    status.write(f"[{elapsed:6.1f}s] ⚠️ GraphRAG: {info.get('error', '')}")
+                    # Show first line of the error inline, full traceback in a sub-block
+                    err = info.get('error', '')
+                    first_line = err.split('\n')[0]
+                    status.write(f"[{elapsed:6.1f}s] ⚠️ GraphRAG: {first_line}")
+                    if '\n' in err:
+                        status.code(err, language='python')
                 elif phase == "graphrag-skipped":
                     status.write(f"[{elapsed:6.1f}s] ⏭️ GraphRAG skipped (GRAPHRAG_ENABLED=false)")
                 elif phase == "done":
