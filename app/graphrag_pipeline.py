@@ -217,6 +217,13 @@ class GraphRAGExtractor(TransformComponent):
 
     def __call__(self, nodes: list[BaseNode], **kwargs) -> list[BaseNode]:
         for n in nodes:
+            # PropertyGraphIndex.insert_nodes() asserts every node has these
+            # two keys in metadata — initialize to empty lists so nodes whose
+            # extraction returns nothing (empty chunk, LLM failure, parse
+            # miss) still satisfy the assert.
+            n.metadata[KG_NODES_KEY] = []
+            n.metadata[KG_RELATIONS_KEY] = []
+
             text = (n.get_content() or "").strip()
             if not text:
                 continue
