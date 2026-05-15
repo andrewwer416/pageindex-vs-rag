@@ -36,7 +36,8 @@ from openai import OpenAI as _RawOpenAI
 
 # LlamaIndex imports — keep them at module import time so import errors land
 # during app startup rather than mid-indexing.
-from llama_index.core import Document, PropertyGraphIndex
+from llama_index.core import Document, PropertyGraphIndex, Settings
+from llama_index.core.embeddings import BaseEmbedding
 from llama_index.core.graph_stores import SimplePropertyGraphStore
 from llama_index.core.graph_stores.types import (
     EntityNode,
@@ -49,8 +50,10 @@ from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.query_engine import CustomQueryEngine
 from llama_index.core.schema import BaseNode, TransformComponent
 from llama_index.llms.openai import OpenAI
+from pydantic import PrivateAttr
 
 from . import config
+from .embed import get_embedder
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -85,6 +88,34 @@ def _parse_headers() -> dict:
     if custom_auth and api_key:
         headers[custom_auth] = api_key
     return headers
+
+
+class _LocalEmbeddingAdapter(BaseEmbedding):
+    """LlamaIndex-compatible adapter that delegates to whatever app.embed
+    has configured — sentence-transformers (local) or our OpenAI-compatible
+    embed endpoint. Avoids LlamaIndex's default fallback to hosted OpenAI."""
+
+    _embedder: object = PrivateAttr()
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._embedder = get_embedder()
+
+    def _get_query_embedding(self, query: str) -> list[float]:
+        v = self._embedder.encode([query], normalize_embeddings=True)
+        try:
+            return v[0].tolist()
+        except AttributeError:
+            return list(v[0])
+
+    async def _aget_query_embedding(self, query: str) -> list[float]:
+        return self._get_query_embedding(query)
+
+    def _get_text_embedding(self, text: str) -> list[float]:
+        return self._get_query_embedding(text)
+
+    async def _aget_text_embedding(self, text: str) -> list[float]:
+        return self._get_query_embedding(text)
 
 
 def _build_llm() -> OpenAI:
@@ -427,6 +458,13 @@ def build_index(source_text: str, graphrag_dir: Path, max_paths_per_chunk: int =
     under `graphrag_dir`. Returns a small dict of stats for the progress UI.
     """
     llm = _build_llm()
+    embed = _LocalEmbeddingAdapter()
+    # Force LlamaIndex to use our LLM + embedder for any downstream defaults,
+    # otherwise PropertyGraphIndex / its components will silently try to
+    # instantiate hosted OpenAI clients on first call.
+    Settings.llm = llm
+    Settings.embed_model = embed
+
     splitter = SentenceSplitter(chunk_size=1024, chunk_overlap=20)
     docs = [Document(text=source_text)]
     nodes = splitter.get_nodes_from_documents(docs)
@@ -438,6 +476,8 @@ def build_index(source_text: str, graphrag_dir: Path, max_paths_per_chunk: int =
         nodes=nodes,
         property_graph_store=store,
         kg_extractors=[extractor],
+        embed_model=embed,
+        embed_kg_nodes=False,  # we don't need vector retrieval over graph nodes for this flow
         show_progress=False,
     )
     store.build_communities(llm=llm, max_cluster_size=max_cluster_size)
@@ -498,6 +538,12 @@ def answer(query: str, graphrag_dir: Path, doc_name: str | None = None) -> dict:
         }
 
     llm = _build_llm()
+    # The query path doesn't touch embeddings, but set them anyway so any
+    # internal LlamaIndex Settings reference doesn't fall through to hosted
+    # OpenAI as a default.
+    Settings.llm = llm
+    Settings.embed_model = _LocalEmbeddingAdapter()
+
     partials: list[dict] = []
     for cid, summary in summaries.items():
         prompt = PER_COMMUNITY_TMPL.format(summary=summary, query=query)
