@@ -429,50 +429,116 @@ class GraphRAGStore(SimplePropertyGraphStore):
     def get_community_to_entities(self) -> dict[int, list[str]]:
         return {cid: sorted(names) for cid, names in self._community_to_entities.items()}
 
-    def build_communities(self, llm: Any, max_cluster_size: int = 10) -> None:
+    def _iter_triplets_safe(self) -> Iterable[tuple[str, str, str, str]]:
+        """Yield (src_name, label, tgt_name, description) for every relation
+        stored on this property graph.
+
+        Two important LlamaIndex-API gotchas this works around:
+        1. `SimplePropertyGraphStore.get_triplets()` returns [] when called
+           without filter args.
+        2. The framework's `upsert_relations` path only writes to
+           `self.graph.relations`, never to `self.graph.triplets` — so the
+           inner `get_triplets()` is also empty after indexing.
+
+        We rebuild triplets ourselves from `self.graph.relations` + nodes.
+        """
+        try:
+            relations = list(self.graph.relations.values())
+            nodes = self.graph.nodes
+        except Exception:
+            return
+        for rel in relations:
+            src_id = getattr(rel, "source_id", None)
+            tgt_id = getattr(rel, "target_id", None)
+            if not (src_id and tgt_id):
+                continue
+            src_node = nodes.get(src_id)
+            tgt_node = nodes.get(tgt_id)
+            src = getattr(src_node, "name", None) or str(src_id)
+            tgt = getattr(tgt_node, "name", None) or str(tgt_id)
+            lbl = getattr(rel, "label", "") or ""
+            desc = ""
+            props = getattr(rel, "properties", None)
+            if isinstance(props, dict):
+                desc = props.get("description", "") or ""
+            yield str(src), str(lbl), str(tgt), str(desc)
+
+    def build_communities(self, llm: Any, max_cluster_size: int = 10) -> dict:
         """Run hierarchical Leiden over the graph and ask the LLM to summarize
-        each community. Idempotent — overwrites previous summaries."""
+        each community. Idempotent — overwrites previous summaries.
+
+        Returns a small diagnostic dict so the caller can surface why
+        community detection found nothing if that's what happened."""
         import networkx as nx
-        from graspologic.partition import hierarchical_leiden
+
+        diag: dict[str, Any] = {
+            "n_graph_nodes": 0,
+            "n_graph_edges": 0,
+            "n_connected_components": 0,
+            "detector": None,
+            "detector_error": None,
+            "n_communities": 0,
+            "n_summaries": 0,
+        }
 
         # Translate the property graph into a NetworkX graph for community
         # detection. Nodes = entity names, edges = relations.
         g = nx.Graph()
-        for rel in self.get_triplets():
-            try:
-                src, _label, tgt, _desc = rel  # depending on simplegraph API
-            except (TypeError, ValueError):
-                src = getattr(rel, "source_id", None)
-                tgt = getattr(rel, "target_id", None)
-                if not (src and tgt):
-                    continue
+        for src, _l, tgt, _d in self._iter_triplets_safe():
+            if src == tgt:  # skip self-loops; community detection ignores them
+                continue
             g.add_edge(src, tgt)
+
+        diag["n_graph_nodes"] = g.number_of_nodes()
+        diag["n_graph_edges"] = g.number_of_edges()
+        diag["n_connected_components"] = nx.number_connected_components(g) if g.number_of_nodes() else 0
 
         if g.number_of_nodes() == 0:
             self._community_summaries = {}
             self._community_to_entities = {}
-            return
+            return diag
+
+        # Try hierarchical Leiden first, then Louvain, then fall back to
+        # connected components. Each entity ends up in exactly one community.
+        comm_to_entities: dict[int, set[str]] = {}
 
         try:
+            from graspologic.partition import hierarchical_leiden
             communities = hierarchical_leiden(g, max_cluster_size=max_cluster_size)
-        except Exception:
-            # Fall back to NetworkX's louvain if graspologic chokes on the graph.
-            from networkx.algorithms.community import louvain_communities
-            louv = louvain_communities(g)
-            communities = [
-                # mimic graspologic's HierarchicalCluster shape: .node, .cluster
-                type("_C", (), {"node": n, "cluster": cid, "level": 0})()
-                for cid, comm in enumerate(louv) for n in comm
-            ]
+            for item in communities:
+                cid = getattr(item, "cluster", None)
+                node = getattr(item, "node", None)
+                if cid is None or node is None:
+                    continue
+                comm_to_entities.setdefault(int(cid), set()).add(node)
+            diag["detector"] = "hierarchical_leiden"
+        except Exception as e:
+            diag["detector_error"] = f"hierarchical_leiden: {type(e).__name__}: {e}"
+            comm_to_entities = {}
 
-        # Group entity names by cluster
-        comm_to_entities: dict[int, set[str]] = {}
-        for item in communities:
-            cid = getattr(item, "cluster", None)
-            node = getattr(item, "node", None)
-            if cid is None or node is None:
-                continue
-            comm_to_entities.setdefault(cid, set()).add(node)
+        if not comm_to_entities:
+            try:
+                from networkx.algorithms.community import louvain_communities
+                louv = louvain_communities(g)
+                for cid, comm in enumerate(louv):
+                    if comm:
+                        comm_to_entities[cid] = set(comm)
+                diag["detector"] = "louvain"
+            except Exception as e:
+                prev = diag["detector_error"]
+                diag["detector_error"] = (
+                    f"{prev}; louvain: {type(e).__name__}: {e}" if prev
+                    else f"louvain: {type(e).__name__}: {e}"
+                )
+
+        if not comm_to_entities:
+            # Last-resort fallback: every connected component becomes a community.
+            for cid, comp in enumerate(nx.connected_components(g)):
+                if comp:
+                    comm_to_entities[cid] = set(comp)
+            diag["detector"] = (diag["detector"] or "") + "+connected_components" if diag["detector"] else "connected_components"
+
+        diag["n_communities"] = len(comm_to_entities)
 
         # Build per-relation text within each community for the summarizer
         node_to_comm: dict[str, int] = {}
@@ -481,19 +547,23 @@ class GraphRAGStore(SimplePropertyGraphStore):
                 node_to_comm.setdefault(name, cid)
 
         comm_to_relations: dict[int, list[str]] = {}
-        for src, _l, tgt, desc in (
-            t for t in self._iter_triplets_safe()
-        ):
-            cid = node_to_comm.get(src) or node_to_comm.get(tgt)
+        for src, _l, tgt, desc in self._iter_triplets_safe():
+            cid = node_to_comm.get(src)
+            if cid is None:
+                cid = node_to_comm.get(tgt)
             if cid is None:
                 continue
             comm_to_relations.setdefault(cid, []).append(f"- {src} → {tgt}: {desc or _l}")
 
+        # For communities with no relations (singletons), feed the entity list
+        # to the summarizer so they still get a 1-line summary.
+        for cid, names in comm_to_entities.items():
+            if cid not in comm_to_relations:
+                comm_to_relations[cid] = [f"- (isolated entities) {', '.join(sorted(names))}"]
+
         # Summarize each community
         summaries: dict[int, str] = {}
         for cid, rels in comm_to_relations.items():
-            if not rels:
-                continue
             prompt = COMMUNITY_SUMMARY_TMPL.format(
                 relationships="\n".join(rels[:200])  # cap to keep prompt sane
             )
@@ -505,32 +575,8 @@ class GraphRAGStore(SimplePropertyGraphStore):
 
         self._community_summaries = summaries
         self._community_to_entities = comm_to_entities
-
-    def _iter_triplets_safe(self) -> Iterable[tuple[str, str, str, str]]:
-        """Best-effort iterator over (source, label, target, description). The
-        underlying property-graph store API has shifted across LlamaIndex
-        versions — this normalizes both shapes."""
-        try:
-            for t in self.get_triplets():
-                # Older API: tuple/list of length 3 or 4
-                if isinstance(t, (tuple, list)):
-                    if len(t) == 4:
-                        yield t[0], t[1], t[2], t[3]
-                    elif len(t) == 3:
-                        yield t[0], t[1], t[2], ""
-                    continue
-                # Newer API: a Triplet-like object with .source_id, .target_id, .label, .properties
-                src = getattr(t, "source_id", None) or getattr(t, "source", None)
-                tgt = getattr(t, "target_id", None) or getattr(t, "target", None)
-                lbl = getattr(t, "label", "") or ""
-                desc = ""
-                props = getattr(t, "properties", None)
-                if isinstance(props, dict):
-                    desc = props.get("description", "")
-                if src and tgt:
-                    yield str(src), str(lbl), str(tgt), str(desc)
-        except Exception:
-            return
+        diag["n_summaries"] = len(summaries)
+        return diag
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -562,11 +608,12 @@ def _save_store(store: GraphRAGStore, graphrag_dir: Path) -> None:
     _summary_path(graphrag_dir).write_text(json.dumps(payload, indent=2))
 
 
-def _save_debug(graphrag_dir: Path, stats: dict, samples: list) -> None:
+def _save_debug(graphrag_dir: Path, stats: dict, samples: list, community_diag: dict | None = None) -> None:
     graphrag_dir.mkdir(parents=True, exist_ok=True)
-    (graphrag_dir / "extraction_debug.json").write_text(
-        json.dumps({"stats": stats, "samples": samples}, indent=2)
-    )
+    payload = {"stats": stats, "samples": samples}
+    if community_diag is not None:
+        payload["community_diag"] = community_diag
+    (graphrag_dir / "extraction_debug.json").write_text(json.dumps(payload, indent=2))
 
 
 def load_debug(graphrag_dir: Path) -> dict:
@@ -643,15 +690,14 @@ def build_index(source_text: str, graphrag_dir: Path, max_paths_per_chunk: int =
         embed_kg_nodes=False,  # we don't need vector retrieval over graph nodes for this flow
         show_progress=False,
     )
-    store.build_communities(llm=llm, max_cluster_size=max_cluster_size)
+    community_diag = store.build_communities(llm=llm, max_cluster_size=max_cluster_size)
 
     _save_store(store, graphrag_dir)
     extraction_stats = dict(extractor._stats)
-    _save_debug(graphrag_dir, extraction_stats, list(extractor._samples))
+    _save_debug(graphrag_dir, extraction_stats, list(extractor._samples), community_diag)
 
     n_communities = len(store.get_community_summaries())
-    # If we extracted nothing parseable, surface the dominant failure mode so
-    # the upload-page status line says something more useful than "0 entities".
+    # Build a single human-readable hint for the upload-page status line.
     hint = ""
     if extraction_stats["total_entities"] == 0:
         if extraction_stats["n_chunks_llm_failed"] >= extraction_stats["n_chunks"]:
@@ -661,6 +707,13 @@ def build_index(source_text: str, graphrag_dir: Path, max_paths_per_chunk: int =
                     "check extraction_debug.json for sample responses")
         else:
             hint = " — extraction returned nothing (empty model responses)"
+    elif n_communities == 0:
+        if community_diag.get("detector_error"):
+            hint = f" — community detection failed: {community_diag['detector_error']}"
+        elif community_diag.get("n_graph_edges", 0) == 0:
+            hint = " — entities extracted but 0 relations; the graph has no edges to cluster"
+        else:
+            hint = " — community detector returned no clusters"
 
     return {
         "n_chunks": len(nodes),
@@ -669,6 +722,7 @@ def build_index(source_text: str, graphrag_dir: Path, max_paths_per_chunk: int =
         "n_communities": n_communities,
         "hint": hint,
         "extraction_stats": extraction_stats,
+        "community_diag": community_diag,
     }
 
 
@@ -723,18 +777,31 @@ def answer(query: str, graphrag_dir: Path, doc_name: str | None = None) -> dict:
         debug = load_debug(gd)
         stats = debug.get("stats", {})
         samples = debug.get("samples", [])
+        cdiag = debug.get("community_diag", {})
         diag_lines = [
             "GraphRAG indexed without errors but produced **0 communities**, "
             "so there is nothing to answer from on the graph side.",
             "",
+            "**Extraction:**",
             f"- chunks processed: {stats.get('n_chunks', '?')}",
-            f"- chunks where extraction yielded ≥1 entity: {stats.get('n_chunks_with_entities', 0)}",
+            f"- chunks with ≥1 entity: {stats.get('n_chunks_with_entities', 0)}",
             f"- chunks where LLM call failed: {stats.get('n_chunks_llm_failed', 0)}",
             f"- chunks where LLM returned empty text: {stats.get('n_chunks_empty_response', 0)}",
             f"- chunks where parser found nothing: {stats.get('n_chunks_parse_miss', 0)}",
             f"- total entities extracted: {stats.get('total_entities', 0)}",
             f"- total relations extracted: {stats.get('total_relations', 0)}",
         ]
+        if cdiag:
+            diag_lines += [
+                "",
+                "**Community detection:**",
+                f"- graph nodes: {cdiag.get('n_graph_nodes', '?')}",
+                f"- graph edges: {cdiag.get('n_graph_edges', '?')}",
+                f"- connected components: {cdiag.get('n_connected_components', '?')}",
+                f"- detector used: {cdiag.get('detector') or '(none ran)'}",
+                f"- detector error: {cdiag.get('detector_error') or '(none)'}",
+                f"- communities found: {cdiag.get('n_communities', 0)}",
+            ]
         if samples:
             diag_lines += ["", "**Sample LLM responses** (first few problematic chunks):", ""]
             for s in samples[:3]:
@@ -743,12 +810,13 @@ def answer(query: str, graphrag_dir: Path, doc_name: str | None = None) -> dict:
                 diag_lines.append("```\n" + (resp[:600] or "(empty response)") + "\n```")
         diag_lines += [
             "",
-            "**What this means:** entity extraction did not produce enough "
-            "structured output for community detection. Likely causes: model "
-            "is not following the `[ENTITY]` / `[RELATION]` block format, "
-            "context is too short, or auth is silently returning empty bodies. "
-            "Try a larger model for `GRAPHRAG_MODEL`, or inspect "
-            "`extraction_debug.json` under this doc's `graphrag/` dir.",
+            "**What this means:** see counts above. Common causes: (a) "
+            "entity extraction returned text but the parser couldn't match "
+            "it — check sample responses, (b) entities extracted but 0 "
+            "relations so the graph has no edges to cluster, (c) community "
+            "detector raised an error — see `detector error` above. The "
+            "full debug payload is at `extraction_debug.json` under this "
+            "doc's `graphrag/` dir.",
         ]
         return {
             "answer": "\n".join(diag_lines),
