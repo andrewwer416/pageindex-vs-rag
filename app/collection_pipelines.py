@@ -283,8 +283,10 @@ def build_graphrag(col_id: str, doc_ids: list[str], progress: Callable[[str, dic
     from llama_index.core.graph_stores.types import EntityNode, Relation
 
     def _p(phase: str, **kw):
+        # progress here is build_collection's inner _p, signature (phase, **kw)
+        # — must unpack, not pass as a positional dict.
         if progress:
-            progress(phase, kw)
+            progress(phase, **kw)
 
     # ----- step 1: gather entities + relations from all per-doc graphs -----
     all_entities: list[dict] = []  # {"name", "description", "doc_id", "doc_name", "node_id"}
