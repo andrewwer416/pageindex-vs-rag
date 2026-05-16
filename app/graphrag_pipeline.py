@@ -23,16 +23,11 @@ Returns a structured trace mirroring the other two pipelines so the
 Compare-page tabs can render uniformly.
 """
 from __future__ import annotations
-import asyncio
 import json
 import os
 import re
-import threading
 from pathlib import Path
-from typing import Any, Iterable, Optional
-
-import httpx
-from openai import OpenAI as _RawOpenAI
+from typing import Any, Iterable
 
 # LlamaIndex imports — keep them at module import time so import errors land
 # during app startup rather than mid-indexing.
@@ -45,14 +40,20 @@ from llama_index.core.graph_stores.types import (
     KG_RELATIONS_KEY,
     Relation,
 )
-from llama_index.core.llms import ChatMessage
+from llama_index.core.llms import (
+    ChatMessage,
+    ChatResponse,
+    CompletionResponse,
+    CustomLLM,
+    LLMMetadata,
+    MessageRole,
+)
+from llama_index.core.llms.callbacks import llm_chat_callback, llm_completion_callback
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.core.query_engine import CustomQueryEngine
 from llama_index.core.schema import BaseNode, TransformComponent
-from llama_index.llms.openai import OpenAI
 from pydantic import PrivateAttr
 
-from . import config
+from . import config, llm as _local_llm
 from .embed import get_embedder
 
 
@@ -68,26 +69,6 @@ def _env(name: str, fallback: str | None = None, default: str = "") -> str:
     if fallback:
         return os.environ.get(fallback, "").strip() or default
     return default
-
-
-def _parse_headers() -> dict:
-    raw = _env("GRAPHRAG_HEADERS", "LLM_HEADERS")
-    headers: dict[str, str] = {}
-    if raw:
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                headers = {str(k): str(v) for k, v in parsed.items()}
-        except json.JSONDecodeError:
-            for pair in raw.split(";"):
-                if ":" in pair:
-                    k, v = pair.split(":", 1)
-                    headers[k.strip()] = v.strip()
-    custom_auth = _env("GRAPHRAG_API_KEY_HEADER", "LLM_API_KEY_HEADER")
-    api_key = _env("GRAPHRAG_API_KEY", "LLM_API_KEY")
-    if custom_auth and api_key:
-        headers[custom_auth] = api_key
-    return headers
 
 
 class _LocalEmbeddingAdapter(BaseEmbedding):
@@ -118,31 +99,78 @@ class _LocalEmbeddingAdapter(BaseEmbedding):
         return self._get_query_embedding(text)
 
 
-def _build_llm() -> OpenAI:
-    """LlamaIndex's OpenAI LLM, wired to whatever endpoint LLM_API_BASE is.
-    Accepts a fully-configured httpx.Client so our private CA / custom-header
-    auth flow keeps working — same pattern as app/llm.py.
-    """
-    ca = _env("GRAPHRAG_CA_BUNDLE", "LLM_CA_BUNDLE")
-    verify: bool | str = ca if ca else True
-    if (_env("GRAPHRAG_VERIFY_SSL") or _env("LLM_VERIFY_SSL")).lower() == "false":
-        verify = False
-    timeout = int(_env("GRAPHRAG_TIMEOUT", "LLM_TIMEOUT", default="600"))
-    cert = _env("GRAPHRAG_CLIENT_CERT", "LLM_CLIENT_CERT")
-    http_kwargs: dict = {"verify": verify, "timeout": timeout}
-    if cert:
-        http_kwargs["cert"] = tuple(cert.split(":", 1)) if ":" in cert else cert
-    http_client = httpx.Client(**http_kwargs)
+class _LocalLLMAdapter(CustomLLM):
+    """LlamaIndex-compatible LLM that delegates to `app.llm` — the same
+    openai.OpenAI client RAG and PageIndex already use.
 
-    return OpenAI(
-        model=_env("GRAPHRAG_MODEL") or config.MODEL,
-        api_base=_env("GRAPHRAG_API_BASE", "LLM_API_BASE", default=config.LLM_API_BASE),
-        api_key=_env("GRAPHRAG_API_KEY", "LLM_API_KEY", default="not-needed"),
-        default_headers=_parse_headers() or None,
-        http_client=http_client,
-        temperature=0.0,
-        timeout=float(timeout),
-    )
+    We do NOT use `llama_index.llms.openai.OpenAI` here because it builds its
+    own openai client lifecycle that doesn't always honor our custom
+    `apikey` header / private CA / mTLS setup on the first request. Routing
+    everything through one shared client keeps GraphRAG's transport identical
+    to the working pipelines, which matters on proprietary networks where
+    every LLM call must hit the user's internal gateway.
+    """
+
+    model: str = ""
+    temperature: float = 0.0
+    max_tokens: int = 2048
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.model = _env("GRAPHRAG_MODEL") or config.MODEL or "qwen3:14b"
+
+    @property
+    def metadata(self) -> LLMMetadata:
+        return LLMMetadata(
+            context_window=int(_env("GRAPHRAG_CONTEXT_WINDOW", "LLM_CONTEXT_WINDOW", default="16384")),
+            num_output=self.max_tokens,
+            is_chat_model=True,
+            is_function_calling_model=False,
+            model_name=self.model,
+        )
+
+    def _to_dict_messages(self, messages: list[ChatMessage]) -> list[dict]:
+        out: list[dict] = []
+        for m in messages:
+            role = getattr(m.role, "value", None) or str(m.role)
+            content = m.content or ""
+            out.append({"role": role, "content": content})
+        return out
+
+    @llm_chat_callback()
+    def chat(self, messages: list[ChatMessage], **kwargs) -> ChatResponse:
+        result = _local_llm.complete(
+            model=self.model,
+            messages=self._to_dict_messages(messages),
+            temperature=kwargs.get("temperature", self.temperature),
+            max_tokens=kwargs.get("max_tokens", self.max_tokens),
+        )
+        return ChatResponse(
+            message=ChatMessage(role=MessageRole.ASSISTANT, content=result.get("content", "")),
+            raw=result.get("raw"),
+        )
+
+    @llm_completion_callback()
+    def complete(self, prompt: str, formatted: bool = False, **kwargs) -> CompletionResponse:
+        result = _local_llm.complete(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=kwargs.get("temperature", self.temperature),
+            max_tokens=kwargs.get("max_tokens", self.max_tokens),
+        )
+        return CompletionResponse(text=result.get("content", ""), raw=result.get("raw"))
+
+    @llm_completion_callback()
+    def stream_complete(self, prompt: str, formatted: bool = False, **kwargs):
+        # GraphRAG's flow never streams — yield the full completion once.
+        yield self.complete(prompt, formatted=formatted, **kwargs)
+
+
+def _build_llm() -> "_LocalLLMAdapter":
+    """Return a LlamaIndex LLM that uses our shared `app.llm` transport. All
+    auth/CA/header complexity is inherited from app/llm.py — no separate
+    config path for GraphRAG, so what works for RAG works for GraphRAG."""
+    return _LocalLLMAdapter()
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -290,7 +318,7 @@ class GraphRAGExtractor(TransformComponent):
     _samples: list = PrivateAttr(default_factory=list)
     _max_samples: int = PrivateAttr(default=6)
 
-    def __init__(self, llm: OpenAI, max_paths_per_chunk: int = 2, **kwargs):
+    def __init__(self, llm: Any, max_paths_per_chunk: int = 2, **kwargs):
         super().__init__(llm=llm, max_paths_per_chunk=max_paths_per_chunk, **kwargs)
         self._stats = {
             "n_chunks": 0,
@@ -401,7 +429,7 @@ class GraphRAGStore(SimplePropertyGraphStore):
     def get_community_to_entities(self) -> dict[int, list[str]]:
         return {cid: sorted(names) for cid, names in self._community_to_entities.items()}
 
-    def build_communities(self, llm: OpenAI, max_cluster_size: int = 10) -> None:
+    def build_communities(self, llm: Any, max_cluster_size: int = 10) -> None:
         """Run hierarchical Leiden over the graph and ask the LLM to summarize
         each community. Idempotent — overwrites previous summaries."""
         import networkx as nx
@@ -771,11 +799,12 @@ def answer(query: str, graphrag_dir: Path, doc_name: str | None = None) -> dict:
 # ───────────────────────────────────────────────────────────────────────────
 
 def describe_graphrag_config() -> dict:
-    api_key = _env("GRAPHRAG_API_KEY", "LLM_API_KEY")
+    """GraphRAG now shares the same openai.OpenAI client as `app.llm` — see the
+    'LLM transport' section for auth/CA details. Only the model name is
+    independently configurable here (GRAPHRAG_MODEL), and it falls back to MODEL.
+    """
     return {
-        "base_url": _env("GRAPHRAG_API_BASE", "LLM_API_BASE", default=config.LLM_API_BASE),
+        "transport": "shared with LLM (see 'LLM transport' above)",
         "model": _env("GRAPHRAG_MODEL") or config.MODEL,
-        "api_key": "<hidden>" if api_key else "(not configured)",
-        "api_key sent via": _env("GRAPHRAG_API_KEY_HEADER", "LLM_API_KEY_HEADER") or "Authorization (SDK default)",
-        "ca_bundle": _env("GRAPHRAG_CA_BUNDLE", "LLM_CA_BUNDLE") or "(system CAs)",
+        "model env override": "GRAPHRAG_MODEL" if _env("GRAPHRAG_MODEL") else "(falls back to MODEL)",
     }
