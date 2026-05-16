@@ -249,7 +249,20 @@ def render_graphrag(results: dict):
     if gr is None:
         st.info("No result.")
         return
-    st.markdown(f"**Answer** *(aggregated across {gr.get('n_communities', 0)} communities, "
+
+    n_comm = gr.get("n_communities", 0)
+    if n_comm == 0:
+        # Diagnostic path: the answer field contains a markdown-formatted
+        # explanation of why we have no communities — render it as such
+        # rather than as a normal answer.
+        st.warning(
+            "GraphRAG produced 0 communities for this document — "
+            "nothing to query. See the diagnostic below."
+        )
+        st.markdown(gr.get("answer", ""))
+        return
+
+    st.markdown(f"**Answer** *(aggregated across {n_comm} communities, "
                 f"generated in {results['gr_time']:.1f}s)*")
     _render_empty_warning("GraphRAG", gr.get("answer", ""))
     st.write(gr.get("answer", ""))

@@ -79,10 +79,23 @@ if uploaded is not None:
                         f"[{elapsed:6.1f}s] 🕸️ building GraphRAG: entity extraction + community summaries"
                     )
                 elif phase == "graphrag-done":
+                    n_comm = info.get('n_communities', 0)
+                    icon = "✅" if n_comm > 0 else "⚠️"
                     status.write(
-                        f"[{elapsed:6.1f}s] ✅ GraphRAG: {info.get('n_chunks','?')} chunks, "
-                        f"{info.get('n_entities','?')} entities, {info.get('n_communities','?')} communities"
+                        f"[{elapsed:6.1f}s] {icon} GraphRAG: {info.get('n_chunks','?')} chunks, "
+                        f"{info.get('n_entities','?')} entities, "
+                        f"{info.get('n_relations', '?')} relations, "
+                        f"{n_comm} communities{info.get('hint', '')}"
                     )
+                    if n_comm == 0:
+                        stats = info.get("extraction_stats") or {}
+                        if stats:
+                            status.write(
+                                f"  · chunks with ≥1 entity: {stats.get('n_chunks_with_entities', 0)} / "
+                                f"{stats.get('n_chunks', '?')}, "
+                                f"LLM failures: {stats.get('n_chunks_llm_failed', 0)}, "
+                                f"parse misses: {stats.get('n_chunks_parse_miss', 0)}"
+                            )
                 elif phase == "graphrag-failed":
                     # Show first line of the error inline, full traceback in a sub-block
                     err = info.get('error', '')

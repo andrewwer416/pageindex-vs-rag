@@ -186,9 +186,82 @@ _RELATION_BLOCK = re.compile(
     re.IGNORECASE,
 )
 
+# Loose fallbacks — small models (gemma, qwen3:8b, …) frequently drop the
+# bracketed [ENTITY]/[RELATION] tags or wrap them in bold markdown. Try these
+# only if the strict parse returned nothing.
+_LOOSE_HEADER_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?(?:\*{0,2})\s*\[?(entity|relation|relationship|edge|node)\]?\s*\*{0,2}\s*[:\-]?",
+    re.IGNORECASE,
+)
+_KV_RE = re.compile(r"^\s*(?:[-*]\s*)?\*{0,2}\s*(\w[\w\s]*?)\s*\*{0,2}\s*[:\-]\s*(.+?)\s*$")
+
+
+def _parse_loose_blocks(text: str) -> tuple[list[dict], list[dict]]:
+    """Permissive parser: scan line-by-line, split into blocks on a header
+    line ('Entity:', '**Relation**:', '- entity', etc.), and pull key/value
+    pairs out of the body. Accepts entities with just a name (no description)
+    and relations with just src/tgt/label."""
+    entities: list[dict] = []
+    relations: list[dict] = []
+    if not text:
+        return entities, relations
+
+    blocks: list[tuple[str, list[tuple[str, str]]]] = []
+    current_kind: str | None = None
+    current_kv: list[tuple[str, str]] = []
+
+    def _flush():
+        nonlocal current_kind, current_kv
+        if current_kind and current_kv:
+            blocks.append((current_kind, current_kv))
+        current_kind, current_kv = None, []
+
+    for line in text.splitlines():
+        h = _LOOSE_HEADER_RE.match(line)
+        if h:
+            _flush()
+            kind = h.group(1).lower()
+            current_kind = "entity" if kind in {"entity", "node"} else "relation"
+            # The header line may itself carry the name inline: "Entity: Foo"
+            tail = line[h.end():].strip().strip("*").strip()
+            if tail and ":" not in tail and len(tail) < 200:
+                current_kv.append(("name" if current_kind == "entity" else "label", tail))
+            continue
+        if current_kind is None:
+            continue
+        m = _KV_RE.match(line)
+        if m:
+            current_kv.append((m.group(1).strip().lower(), m.group(2).strip()))
+        elif not line.strip():
+            _flush()
+    _flush()
+
+    for kind, kvs in blocks:
+        d = {k: v for k, v in kvs}
+        if kind == "entity":
+            name = d.get("name") or d.get("entity") or d.get("node") or d.get("term")
+            if not name:
+                continue
+            entities.append({"name": name, "description": d.get("description") or d.get("desc") or d.get("definition") or ""})
+        else:
+            src = d.get("source") or d.get("src") or d.get("from") or d.get("subject")
+            tgt = d.get("target") or d.get("tgt") or d.get("to") or d.get("object")
+            lbl = d.get("label") or d.get("relation") or d.get("predicate") or d.get("type") or ""
+            if not (src and tgt):
+                continue
+            relations.append({
+                "source": src, "target": tgt, "label": lbl or "related_to",
+                "description": d.get("description") or d.get("desc") or "",
+            })
+    return entities, relations
+
 
 def _parse_extraction(text: str) -> tuple[list[dict], list[dict]]:
-    """Return (entities, relations) lists from the LLM's extraction response."""
+    """Return (entities, relations) lists from the LLM's extraction response.
+
+    Tries the strict [ENTITY]/[RELATION] block format first. If that yields
+    nothing, falls back to a permissive parser that handles common small-model
+    output variants (markdown bold, missing brackets, dropped fields)."""
     entities: list[dict] = []
     relations: list[dict] = []
     if not text:
@@ -202,6 +275,8 @@ def _parse_extraction(text: str) -> tuple[list[dict], list[dict]]:
             "label": m.group("lbl").strip(),
             "description": m.group("desc").strip(),
         })
+    if not entities and not relations:
+        return _parse_loose_blocks(text)
     return entities, relations
 
 
@@ -211,9 +286,31 @@ class GraphRAGExtractor(TransformComponent):
     PropertyGraphIndex to fold into the graph store."""
     llm: Any = None
     max_paths_per_chunk: int = 2
+    _stats: dict = PrivateAttr(default_factory=dict)
+    _samples: list = PrivateAttr(default_factory=list)
+    _max_samples: int = PrivateAttr(default=6)
 
     def __init__(self, llm: OpenAI, max_paths_per_chunk: int = 2, **kwargs):
         super().__init__(llm=llm, max_paths_per_chunk=max_paths_per_chunk, **kwargs)
+        self._stats = {
+            "n_chunks": 0,
+            "n_chunks_with_entities": 0,
+            "n_chunks_llm_failed": 0,
+            "n_chunks_empty_response": 0,
+            "n_chunks_parse_miss": 0,  # LLM responded with content but parser found 0
+            "total_entities": 0,
+            "total_relations": 0,
+        }
+        self._samples = []
+
+    def _record_sample(self, reason: str, chunk_text: str, raw: str) -> None:
+        if len(self._samples) >= self._max_samples:
+            return
+        self._samples.append({
+            "reason": reason,
+            "chunk_preview": chunk_text[:400],
+            "llm_response": raw[:2000],
+        })
 
     def __call__(self, nodes: list[BaseNode], **kwargs) -> list[BaseNode]:
         for n in nodes:
@@ -227,15 +324,28 @@ class GraphRAGExtractor(TransformComponent):
             text = (n.get_content() or "").strip()
             if not text:
                 continue
+            self._stats["n_chunks"] += 1
             prompt = KG_TRIPLET_EXTRACT_TMPL.format(
                 text=text, max_paths_per_chunk=self.max_paths_per_chunk
             )
             try:
                 resp = self.llm.chat([ChatMessage(role="user", content=prompt)])
                 raw = resp.message.content or ""
-            except Exception:
+            except Exception as e:
+                self._stats["n_chunks_llm_failed"] += 1
+                self._record_sample(f"llm-failed: {type(e).__name__}: {e}", text, "")
                 continue
             ents, rels = _parse_extraction(raw)
+            if not raw.strip():
+                self._stats["n_chunks_empty_response"] += 1
+                self._record_sample("empty-response", text, raw)
+            elif not ents and not rels:
+                self._stats["n_chunks_parse_miss"] += 1
+                self._record_sample("parse-miss", text, raw)
+            else:
+                self._stats["n_chunks_with_entities"] += 1
+            self._stats["total_entities"] += len(ents)
+            self._stats["total_relations"] += len(rels)
             kg_nodes = [
                 EntityNode(name=e["name"], label="entity",
                            properties={"description": e["description"]})
@@ -424,6 +534,24 @@ def _save_store(store: GraphRAGStore, graphrag_dir: Path) -> None:
     _summary_path(graphrag_dir).write_text(json.dumps(payload, indent=2))
 
 
+def _save_debug(graphrag_dir: Path, stats: dict, samples: list) -> None:
+    graphrag_dir.mkdir(parents=True, exist_ok=True)
+    (graphrag_dir / "extraction_debug.json").write_text(
+        json.dumps({"stats": stats, "samples": samples}, indent=2)
+    )
+
+
+def load_debug(graphrag_dir: Path) -> dict:
+    """Return the extraction-debug payload (stats + samples) if persisted."""
+    p = Path(graphrag_dir) / "extraction_debug.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {}
+
+
 def load_store(graphrag_dir: Path) -> tuple[GraphRAGStore | None, dict]:
     """Load the persisted store + summary dict. Returns (None, {}) if not built."""
     sp = _store_path(graphrag_dir)
@@ -490,10 +618,29 @@ def build_index(source_text: str, graphrag_dir: Path, max_paths_per_chunk: int =
     store.build_communities(llm=llm, max_cluster_size=max_cluster_size)
 
     _save_store(store, graphrag_dir)
+    extraction_stats = dict(extractor._stats)
+    _save_debug(graphrag_dir, extraction_stats, list(extractor._samples))
+
+    n_communities = len(store.get_community_summaries())
+    # If we extracted nothing parseable, surface the dominant failure mode so
+    # the upload-page status line says something more useful than "0 entities".
+    hint = ""
+    if extraction_stats["total_entities"] == 0:
+        if extraction_stats["n_chunks_llm_failed"] >= extraction_stats["n_chunks"]:
+            hint = " — every extraction LLM call failed; check transport/auth"
+        elif extraction_stats["n_chunks_parse_miss"] > 0:
+            hint = (" — model returned text but parser found no entities; "
+                    "check extraction_debug.json for sample responses")
+        else:
+            hint = " — extraction returned nothing (empty model responses)"
+
     return {
         "n_chunks": len(nodes),
-        "n_entities": sum(1 for _ in store.get_triplets()),
-        "n_communities": len(store.get_community_summaries()),
+        "n_entities": extraction_stats["total_entities"],
+        "n_relations": extraction_stats["total_relations"],
+        "n_communities": n_communities,
+        "hint": hint,
+        "extraction_stats": extraction_stats,
     }
 
 
@@ -535,13 +682,52 @@ def answer(query: str, graphrag_dir: Path, doc_name: str | None = None) -> dict:
     Returns the same general shape as the other two pipelines so the Compare
     page can render uniformly: {"answer": str, "thinking": str, "steps": [...]}.
     """
-    store, summaries = load_store(Path(graphrag_dir))
-    if store is None or not summaries:
+    gd = Path(graphrag_dir)
+    store, summaries = load_store(gd)
+    if store is None:
         return {
             "answer": "(GraphRAG index not built for this document.)",
             "thinking": "",
             "n_communities": 0,
             "partials": [],
+        }
+    if not summaries:
+        debug = load_debug(gd)
+        stats = debug.get("stats", {})
+        samples = debug.get("samples", [])
+        diag_lines = [
+            "GraphRAG indexed without errors but produced **0 communities**, "
+            "so there is nothing to answer from on the graph side.",
+            "",
+            f"- chunks processed: {stats.get('n_chunks', '?')}",
+            f"- chunks where extraction yielded ≥1 entity: {stats.get('n_chunks_with_entities', 0)}",
+            f"- chunks where LLM call failed: {stats.get('n_chunks_llm_failed', 0)}",
+            f"- chunks where LLM returned empty text: {stats.get('n_chunks_empty_response', 0)}",
+            f"- chunks where parser found nothing: {stats.get('n_chunks_parse_miss', 0)}",
+            f"- total entities extracted: {stats.get('total_entities', 0)}",
+            f"- total relations extracted: {stats.get('total_relations', 0)}",
+        ]
+        if samples:
+            diag_lines += ["", "**Sample LLM responses** (first few problematic chunks):", ""]
+            for s in samples[:3]:
+                diag_lines.append(f"_reason: {s.get('reason', '?')}_")
+                resp = s.get("llm_response", "")
+                diag_lines.append("```\n" + (resp[:600] or "(empty response)") + "\n```")
+        diag_lines += [
+            "",
+            "**What this means:** entity extraction did not produce enough "
+            "structured output for community detection. Likely causes: model "
+            "is not following the `[ENTITY]` / `[RELATION]` block format, "
+            "context is too short, or auth is silently returning empty bodies. "
+            "Try a larger model for `GRAPHRAG_MODEL`, or inspect "
+            "`extraction_debug.json` under this doc's `graphrag/` dir.",
+        ]
+        return {
+            "answer": "\n".join(diag_lines),
+            "thinking": "",
+            "n_communities": 0,
+            "partials": [],
+            "extraction_stats": stats,
         }
 
     llm = _build_llm()
